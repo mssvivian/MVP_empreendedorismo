@@ -1,0 +1,11 @@
+services:
+  cltempo:
+    build: .
+    container_name: cltempo_app
+    ports:
+      - "8765:8765"
+    environment:
+      - PORT=8765
+    volumes:
+      - ./mvp_filas.db:/app/mvp_filas.db
+    restart: unless-stopped
