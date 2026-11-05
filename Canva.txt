@@ -1,0 +1,15 @@
+O Business Model Canvas (BMC) fornece a estrutura estratégica para preencher os três blocos vazios do seu MVP Canvas, mantendo o foco estrito na hipótese central de valor.
+Preenchimento dos Blocos Pendentes do MVP
+ * Resultado esperado: Validar se o público CLT corporativo realmente adota o aplicativo para economizar tempo no almoço e comprovar se os restaurantes parceiros percebem ganho de eficiência no atendimento sem complicações operacionais.
+ * Métricas para validar as hipóteses do negócio:
+   * Taxa de conversão de restaurantes abordados que aceitam entrar no período de teste piloto.
+   * Número de entradas registradas na fila digital por usuário a cada semana.
+   * Taxa de desistência ou cancelamento da fila antes de ser chamado.
+   * Redução no tempo percebido de espera em pé relatada pelos usuários.
+ * Custo & cronograma:
+   * Custo: Direcionado à equipe de tecnologia para desenvolver o fluxo básico da fila digital e à verba de incentivo/desconto para os primeiros restaurantes em teste.
+   * Cronograma: Prazo sugerido de 4 a 6 semanas para construir o protótipo funcional do app e 3 a 4 semanas de piloto prático em restaurantes parceiros de uma mesma região empresarial.
+Ajustes nos Blocos já Iniciados
+ * Personas e Jornadas: O público de "juniores com VR generoso" reflete o segmento "nicho/CLTs"; mantenha o foco na dor da pausa curta de almoço entre reuniões.
+ * Funcionalidades: Priorize unicamente a entrada e o acompanhamento da fila digital, postergando itens mais complexos do BMC — como modelos de assinatura premium, receita sobre pedidos e integração com Google Maps — para iterações posteriores.
+Você pretende rodar esse teste piloto em um polo corporativo específico para concentrar os restaurantes e usuários iniciais?
