@@ -1,27 +1,77 @@
-// FilaZero CLT — Frontend SPA Reativo (Filas por Categoria de Mesa + Light/Dark)
+// CLTempo — Frontend SPA Reativo (Arquitetura Modular, 3 Interfaces e Responsivo)
+// Disciplina de Empreendedorismo - UFRJ 2026.2
 
 const appState = {
-  currentView: "split", // split | clt | restaurant | metrics | arch
-  theme: localStorage.getItem("fz_theme") || "light",
-  selectedUserId: 1, // Default: Vivian Souza
-  selectedRestaurantId: 1, // Default: Bistrô do Ouvidor
-  selectedPartySize: 2,
+  mainView: "client", // client | restaurant | admin | split
+  theme: localStorage.getItem("cltempo_theme") || "light",
+  
+  // Autenticação do Cliente
+  clientAuth: {
+    client: JSON.parse(localStorage.getItem("cltempo_client") || "null"),
+    authTab: "login", // login | register
+  },
+  
+  // Abas da Interface Cliente (Buscar | Fila | Perfil)
+  clientActiveTab: "buscar", 
+  
+  // Filtros de Busca
+  searchFilters: {
+    name: "",
+    cuisine_type: "TODOS",
+    max_wait_min: 60,
+    radius_km: 3.0,
+    party_size: 2,
+  },
+  
+  searchResults: [],
+  selectedModalRestaurant: null,
+  clientActiveTicket: null,
+  clientHistory: [],
+
+  // Interface do Restaurante (Gestão de Salão, Fila e Mesas)
+  restaurantAuth: {
+    restaurant: JSON.parse(localStorage.getItem("cltempo_restaurant") || "null"),
+    authTab: "login", // login | register
+    registerVRs: ["Alelo", "Sodexo", "Ticket Restaurante", "VR Refeição"],
+    profileVRs: [],
+    registerCuisine: "Executivo",
+  },
+  restaurantActiveTab: "fila", // fila | mesas | perfil
+  restaurantCallingModal: null, // { entryId, customerName, partySize, tableCategory, suggestedTable }
+  restaurantChangeTableModal: null, // { entryId, currentTableNumber, customerName }
+  selectedRestaurantId: 1,
   selectedRestCategoryFilter: "ALL", // ALL | 1-2 | 3-4 | 5+
-  lastSeatedEntryByUser: {},
+
+  // Dados consolidados do backend
   data: null,
 };
 
-function getTableCategory(partySize) {
-  const p = Number(partySize);
-  if (p <= 2) return "1-2";
-  if (p <= 4) return "3-4";
-  return "5+";
+function getAvailableCuisines() {
+  if (appState.data && appState.data.cuisines && appState.data.cuisines.length > 0) {
+    return appState.data.cuisines;
+  }
+  return [
+    { id: 1, name: "Executivo", icon: "💼" },
+    { id: 2, name: "Buffet a Quilo", icon: "⚖️" },
+    { id: 3, name: "Massas & Italiana", icon: "🍝" },
+    { id: 4, name: "Japonês & Poke", icon: "🍣" },
+    { id: 5, name: "Saladas & Saudável", icon: "🥗" },
+    { id: 6, name: "Grelhados & Carnes", icon: "🥩" },
+    { id: 7, name: "Hambúrguer & Artesanal", icon: "🍔" },
+    { id: 8, name: "Árabe & Contemporânea", icon: "🥙" },
+    { id: 9, name: "Brasileira & Típica", icon: "🍲" },
+    { id: 10, name: "Frutos do Mar", icon: "🍤" },
+    { id: 11, name: "Vegano & Vegetariano", icon: "🌱" },
+    { id: 12, name: "Cafeteria & Doces", icon: "☕" },
+  ];
 }
+
+// ==================== TEMA E TOASTS ====================
 
 function applyTheme(theme) {
   appState.theme = theme;
   document.documentElement.setAttribute("data-theme", theme);
-  localStorage.setItem("fz_theme", theme);
+  localStorage.setItem("cltempo_theme", theme);
   const btn = document.getElementById("btnThemeToggle");
   if (btn) {
     btn.innerHTML = theme === "dark" ? "☀️ Claro" : "🌙 Escuro";
@@ -36,16 +86,14 @@ function showToast(message, color = "var(--primary)") {
   el.style.borderLeftColor = color;
   el.innerHTML = message;
   container.appendChild(el);
-  setTimeout(() => el.remove(), 3500);
+  setTimeout(() => el.remove(), 4000);
 }
 
-async function apiPost(url, payload = {}) {
+// ==================== COMUNICAÇÃO HTTP ====================
+
+async function apiFetch(url, options = {}) {
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const res = await fetch(url, options);
     const data = await res.json();
     if (!res.ok) {
       showToast(data.error || "Erro na operação", "var(--rose)");
@@ -53,19 +101,30 @@ async function apiPost(url, payload = {}) {
     }
     return data;
   } catch (err) {
-    showToast("Falha de conexão com o servidor", "var(--rose)");
+    showToast("Falha de comunicação com o servidor", "var(--rose)");
     return null;
   }
 }
 
+async function apiPost(url, payload = {}) {
+  return apiFetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+// ==================== SSE EM TEMPO REAL ====================
+
 function initSSE() {
   const evtSource = new EventSource("/api/events");
-  evtSource.onmessage = (e) => {
+  evtSource.onmessage = async (e) => {
     try {
       const packet = JSON.parse(e.data);
       if (packet.state) {
         appState.data = packet.state;
-        handleRealtimeNotification(packet.event, packet.meta || {});
+        handleRealtimeEvent(packet.event, packet.meta || {});
+        await refreshClientState();
         renderApp();
       }
     } catch (err) {
@@ -74,862 +133,2803 @@ function initSSE() {
   };
 }
 
-function handleRealtimeNotification(event, meta) {
+function handleRealtimeEvent(event, meta) {
+  const currentClientId = appState.clientAuth.client?.id;
+
   if (event === "queue_joined") {
     showToast(
-      `<strong>${meta.customer_name}</strong> entrou na fila <strong>Mesa ${meta.table_category || ""}</strong> em ${meta.restaurant_name}`,
+      `<strong>${meta.customer_name}</strong> entrou na fila de <strong>Mesa ${meta.table_category}</strong> em ${meta.restaurant_name}`,
       "var(--primary)"
     );
   } else if (event === "queue_call") {
-    showToast(
-      `🔔 <strong>Mesa ${meta.table_category || ""} pronta!</strong> ${meta.restaurant_name} chamou <strong>${meta.customer_name}</strong>`,
-      "var(--emerald)"
-    );
-  } else if (event === "queue_seat") {
-    if (meta.user_id) {
-      appState.lastSeatedEntryByUser[meta.user_id] = {
-        entry_id: meta.entry_id,
-        restaurant_name: meta.restaurant_name,
-      };
+    const isMe = currentClientId && (meta.client_id === currentClientId || meta.user_id === currentClientId);
+    if (isMe) {
+      showToast(
+        `🔔 <strong>SUA VEZ!</strong> ${meta.restaurant_name} chamou sua mesa (${meta.table_category} lug.)! Dirija-se ao balcão.`,
+        "var(--emerald)"
+      );
+    } else {
+      showToast(
+        `🔔 <strong>Mesa pronta:</strong> ${meta.restaurant_name} chamou <strong>${meta.customer_name}</strong>`,
+        "var(--emerald)"
+      );
     }
+  } else if (event === "queue_seat") {
     showToast(`Check-in confirmado: <strong>${meta.customer_name}</strong>`, "var(--emerald)");
-  } else if (event === "queue_cancel") {
-    showToast(`<strong>${meta.customer_name}</strong> saiu da fila`, "var(--amber)");
-  } else if (event === "feedback_recorded") {
-    showToast(`Avaliação registrada (${meta.perceived_min} min em pé)`, "var(--blue)");
+  } else if (event === "queue_cancel" || event === "queue_cancelled") {
+    const isMe =
+      currentClientId &&
+      (meta.client_id === currentClientId ||
+        meta.user_id === currentClientId ||
+        meta.entry_id === appState.clientActiveTicket?.id);
+    if (isMe) {
+      appState.clientActiveTicket = null;
+      showToast(
+        `⚠️ <strong>Atenção:</strong> Sua chamada/reserva em <strong>${meta.restaurant_name || "CLTempo"}</strong> foi cancelada (${meta.cancel_reason || "pelo restaurante"}).`,
+        "var(--rose)"
+      );
+      renderApp();
+    } else {
+      showToast(`Reserva cancelada: <strong>${meta.customer_name}</strong>`, "var(--amber)");
+    }
   } else if (event === "demo_reset") {
-    appState.lastSeatedEntryByUser = {};
-    showToast("Dados restaurados", "var(--blue)");
+    showToast("Dados do piloto restaurados!", "var(--blue)");
   }
 }
 
-// Actions
-async function joinQueue(restaurantId) {
-  const res = await apiPost("/api/queue/join", {
-    restaurant_id: restaurantId,
-    user_id: appState.selectedUserId,
-    party_size: appState.selectedPartySize,
-  });
-  if (res) {
-    appState.selectedRestaurantId = restaurantId;
+// ==================== CARREGAMENTO DE DADOS DO CLIENTE ====================
+
+async function refreshClientState() {
+  const client = appState.clientAuth.client;
+  if (!client) return;
+
+  // 1. Atualizar restaurantes com filtros e score
+  await executeSearch();
+
+  // 2. Buscar ticket ativo
+  const ticketRes = await apiFetch(`/api/client/ticket?client_id=${client.id}`);
+  if (ticketRes) {
+    appState.clientActiveTicket = ticketRes.active_ticket || null;
+  }
+
+  // 3. Buscar histórico
+  const histRes = await apiFetch(`/api/client/history?client_id=${client.id}`);
+  if (histRes && histRes.ok) {
+    appState.clientHistory = histRes.history;
   }
 }
 
-async function triggerQueueAction(entryId, action, extra = {}) {
-  await apiPost("/api/queue/action", { entry_id: entryId, action, ...extra });
+async function executeSearch() {
+  const client = appState.clientAuth.client;
+  const f = appState.searchFilters;
+  const clientIdParam = client ? `&client_id=${client.id}` : "";
+  const params = `name=${encodeURIComponent(f.name)}&cuisine_type=${encodeURIComponent(f.cuisine_type)}&max_wait_min=${f.max_wait_min}&radius_km=${f.radius_km}&party_size=${f.party_size}${clientIdParam}`;
+  
+  const res = await apiFetch(`/api/client/restaurants?${params}`);
+  if (res && res.ok) {
+    appState.searchResults = res.restaurants;
+  }
 }
 
-async function submitStandingWaitFeedback(userId, entryId, minutes) {
-  const res = await apiPost("/api/queue/feedback", {
-    entry_id: entryId,
-    perceived_standing_wait_min: minutes,
-  });
-  if (res) {
-    delete appState.lastSeatedEntryByUser[userId];
+// ==================== AÇÕES DE AUTENTICAÇÃO ====================
+
+function setAuthTab(tab) {
+  appState.clientAuth.authTab = tab;
+  renderApp();
+}
+
+async function submitLogin(e) {
+  e.preventDefault();
+  const email = document.getElementById("loginEmail")?.value;
+  const password = document.getElementById("loginPassword")?.value;
+
+  const res = await apiPost("/api/client/login", { email, password });
+  if (res && res.ok) {
+    appState.clientAuth.client = res.client;
+    localStorage.setItem("cltempo_client", JSON.stringify(res.client));
+    appState.clientActiveTab = "buscar";
+    showToast(`Bem-vindo(a), <strong>${res.client.name}</strong>!`, "var(--emerald)");
+    await refreshClientState();
     renderApp();
   }
 }
 
-async function addWalkinCustomer(e) {
-  e.preventDefault();
-  const nameInput = document.getElementById("walkinName");
-  const partyInput = document.getElementById("walkinParty");
-  if (!nameInput || !nameInput.value.trim()) return;
+let geocodeDebounceTimer = null;
+const workplaceGeocache = { reg: null, prof: null };
+const restaurantGeocache = { reg: null, prof: null };
 
-  await apiPost("/api/queue/join", {
-    restaurant_id: appState.selectedRestaurantId,
-    user_id: null,
-    customer_name: nameInput.value.trim(),
-    company_tag: "Presencial",
-    party_size: parseInt(partyInput.value || "2", 10),
-  });
-  nameInput.value = "";
+function calcElapsedMinutes(timeStr) {
+  if (!timeStr) return 1;
+  try {
+    const parts = String(timeStr).split(" ").pop().split(":");
+    if (parts.length >= 2) {
+      const h = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      const now = new Date();
+      const curM = now.getHours() * 60 + now.getMinutes();
+      const targetM = h * 60 + m;
+      let diff = curM - targetM;
+      if (diff < 0) diff += 1440;
+      return Math.max(1, diff);
+    }
+  } catch (e) {
+    return 1;
+  }
+  return 1;
 }
 
-async function toggleRestaurantOpen(restaurantId) {
-  await apiPost("/api/restaurants/toggle", { restaurant_id: restaurantId });
-}
-
-async function updateLeadStatus(leadId, status) {
-  await apiPost("/api/leads/update", { lead_id: leadId, status });
-}
-
-async function addNewLead(e) {
-  e.preventDefault();
-  const restName = document.getElementById("newLeadName").value.trim();
-  const contact = document.getElementById("newLeadContact").value.trim();
-  const status = document.getElementById("newLeadStatus").value;
-  if (!restName) return;
-  await apiPost("/api/leads/update", {
-    restaurant_name: restName,
-    contact_person: contact || "Gerente",
-    status,
+function closeAllPlaceDropdowns() {
+  document.querySelectorAll(".autocomplete-dropdown").forEach((el) => {
+    el.style.display = "none";
   });
 }
 
-// 1. Clean CLT Mobile View (with Table Size Segmentation)
-function renderCLTPanel() {
-  const { users, restaurants, active_queue } = appState.data;
-  const currentUser = users.find((u) => u.id === Number(appState.selectedUserId)) || users[0];
-  const activeTicket = active_queue.find((q) => q.user_id === currentUser.id);
-  const pendingFeedback = appState.lastSeatedEntryByUser[currentUser.id];
-  const targetCat = getTableCategory(appState.selectedPartySize);
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".autocomplete-wrap")) {
+    closeAllPlaceDropdowns();
+  }
+});
 
-  const userOptions = users
-    .map((u) => {
-      const hasTicket = active_queue.find((q) => q.user_id === u.id);
-      const statusText = hasTicket
-        ? hasTicket.status === "CALLED"
-          ? " • Chamado!"
-          : ` • ${hasTicket.position}º (Mesa ${hasTicket.table_category})`
-        : "";
-      return `<option value="${u.id}" ${u.id === currentUser.id ? "selected" : ""}>
-        ${u.name}${statusText}
-      </option>`;
-    })
-    .join("");
+function handleWorkplaceInput(prefix) {
+  const input = document.getElementById(prefix === "reg" ? "regWorkplace" : "profWorkplace");
+  const dropdown = document.getElementById(prefix === "reg" ? "regPlacesDropdown" : "profPlacesDropdown");
+  const badge = document.getElementById(prefix === "reg" ? "regWorkplaceBadge" : "profWorkplaceBadge");
+  if (!input) return;
 
-  let ticketHTML = "";
-  if (activeTicket) {
-    const isCalled = activeTicket.status === "CALLED";
-    ticketHTML = `
-      <div class="ticket-card ${isCalled ? "called" : ""}">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-          <span class="badge ${isCalled ? "badge-emerald" : "badge-orange"}">
-            ${isCalled ? "🔔 Mesa pronta" : `Fila Mesa ${activeTicket.table_category} lug.`}
-          </span>
-          <span style="font-family:monospace; font-weight:700; font-size:0.82rem; color:var(--text-muted);">
-            #${activeTicket.checkin_code}
-          </span>
-        </div>
-
-        <div style="margin-top:0.55rem;">
-          <div style="font-weight:700; font-size:1.05rem;">${activeTicket.restaurant_name}</div>
-          <div style="font-size:0.75rem; color:var(--text-muted);">
-            Grupo de ${activeTicket.party_size} pessoa(s) • ${activeTicket.tables_in_category} mesas desse porte no salão
-          </div>
-        </div>
-
-        <div class="ticket-metrics">
-          <div class="ticket-metric-box">
-            <div class="ticket-metric-val">${isCalled ? "Agora" : `${activeTicket.position}º`}</div>
-            <div class="ticket-metric-lbl">Posição (${activeTicket.table_category})</div>
-          </div>
-          <div class="ticket-metric-box">
-            <div class="ticket-metric-val">${isCalled ? "0 min" : `~${activeTicket.estimated_wait_min}m`}</div>
-            <div class="ticket-metric-lbl">Espera</div>
-          </div>
-          <div class="ticket-metric-box">
-            <div class="ticket-metric-val">${activeTicket.party_size}p</div>
-            <div class="ticket-metric-lbl">Pessoas</div>
-          </div>
-        </div>
-
-        ${
-          isCalled
-            ? `<div style="display:flex; gap:0.45rem;">
-                <button class="btn btn-emerald btn-block" onclick="triggerQueueAction(${activeTicket.id}, 'seat')">
-                  Confirmar Check-in
-                </button>
-                <button class="btn btn-rose btn-sm" onclick="promptCancelTicket(${activeTicket.id})">
-                  Sair
-                </button>
-              </div>`
-            : `<button class="btn btn-outline btn-block btn-sm" onclick="promptCancelTicket(${activeTicket.id})">
-                Sair da fila
-              </button>`
-        }
-      </div>
-    `;
-  } else if (pendingFeedback) {
-    ticketHTML = `
-      <div class="card" style="padding:1rem; margin-bottom:1rem; border-color:var(--blue);">
-        <div style="font-weight:700; font-size:0.88rem; margin-bottom:0.25rem;">
-          Como foi a chegada no ${pendingFeedback.restaurant_name}?
-        </div>
-        <div style="font-size:0.76rem; color:var(--text-muted); margin-bottom:0.65rem;">
-          Quantos minutos você esperou em pé na fila?
-        </div>
-        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0.35rem;">
-          <button class="btn btn-emerald btn-sm" onclick="submitStandingWaitFeedback(${currentUser.id}, ${pendingFeedback.entry_id}, 0)">0 min</button>
-          <button class="btn btn-outline btn-sm" onclick="submitStandingWaitFeedback(${currentUser.id}, ${pendingFeedback.entry_id}, 2)">2 min</button>
-          <button class="btn btn-outline btn-sm" onclick="submitStandingWaitFeedback(${currentUser.id}, ${pendingFeedback.entry_id}, 5)">5 min</button>
-          <button class="btn btn-outline btn-sm" onclick="submitStandingWaitFeedback(${currentUser.id}, ${pendingFeedback.entry_id}, 10)">10+ m</button>
-        </div>
-      </div>
-    `;
+  clearTimeout(geocodeDebounceTimer);
+  const val = input.value.trim();
+  if (!val || val.length < 2) {
+    if (dropdown) dropdown.style.display = "none";
+    if (badge && !val) {
+      badge.style.display = "none";
+      workplaceGeocache[prefix] = null;
+    }
+    return;
   }
 
-  const restaurantsHTML = restaurants
-    .map((r) => {
-      const isUserHere = activeTicket && activeTicket.restaurant_id === r.id;
-      const catStats = r.queues_by_category
-        ? r.queues_by_category[targetCat]
-        : { waiting: r.waiting_count, est_wait_min: r.estimated_wait_for_new_min, tables: 8 };
-
-      return `
-        <div class="rest-item">
-          <div style="min-width:0;">
-            <div class="rest-name">${r.name}</div>
-            <div class="rest-meta">
-              ${r.category} • ${r.distance_walk_min} min a pé • <strong>${catStats.tables} mesas (${targetCat} lug.)</strong>
+  geocodeDebounceTimer = setTimeout(async () => {
+    const res = await apiFetch(`/api/client/places/autocomplete?query=${encodeURIComponent(val)}`);
+    if (res && res.ok && res.predictions && res.predictions.length > 0) {
+      if (dropdown) {
+        dropdown.innerHTML = `
+          ${res.predictions.map((p) => `
+            <div 
+              class="autocomplete-item" 
+              onclick="selectAutocompletePlace('${prefix}', '${p.main_text.replace(/'/g, "\\'")}', ${p.lat}, ${p.lng})"
+            >
+              <span class="autocomplete-icon">📍</span>
+              <div>
+                <div class="autocomplete-main">${p.main_text}</div>
+                <div class="autocomplete-secondary">${p.secondary_text}</div>
+              </div>
             </div>
-            <div style="display:flex; gap:0.4rem; margin-top:0.45rem; align-items:center; flex-wrap:wrap;">
-              <span class="badge ${catStats.waiting > 0 ? "badge-orange" : "badge-emerald"}">
-                ${catStats.waiting === 0 ? "Fila livre" : `${catStats.waiting} na fila`} (Mesa ${targetCat})
-              </span>
-              <span style="font-size:0.73rem; color:var(--text-muted);">
-                ~${catStats.est_wait_min} min
-              </span>
-            </div>
+          `).join("")}
+          <div class="autocomplete-footer">
+            <span>Sugestões Google Maps</span>
+            <span>CLTempo</span>
           </div>
+        `;
+        dropdown.style.display = "block";
+      }
+    } else {
+      if (dropdown) dropdown.style.display = "none";
+    }
+  }, 250);
+}
 
-          <div>
-            ${
-              !r.is_open
-                ? `<span class="badge badge-rose">Fechado</span>`
-                : `<button
-                    class="btn ${isUserHere ? "btn-outline" : "btn-primary"} btn-sm"
-                    ${activeTicket ? "disabled" : ""}
-                    onclick="joinQueue(${r.id})"
-                  >
-                    ${isUserHere ? "Na fila" : "Entrar"}
-                  </button>`
-            }
+function selectAutocompletePlace(prefix, mainText, lat, lng) {
+  const input = document.getElementById(prefix === "reg" ? "regWorkplace" : "profWorkplace");
+  const dropdown = document.getElementById(prefix === "reg" ? "regPlacesDropdown" : "profPlacesDropdown");
+  const badge = document.getElementById(prefix === "reg" ? "regWorkplaceBadge" : "profWorkplaceBadge");
+
+  if (input) input.value = mainText;
+  workplaceGeocache[prefix] = { lat, lng };
+
+  if (dropdown) dropdown.style.display = "none";
+
+  if (badge) {
+    badge.style.display = "block";
+    badge.innerHTML = `
+      <span style="color:var(--emerald-text); font-weight:600; font-size:0.73rem;">
+        ✓ Localizado no Google Maps: <strong>${mainText}</strong> (${lat.toFixed(4)}, ${lng.toFixed(4)})
+      </span>
+    `;
+  }
+}
+
+function handleRestaurantAddressInput(prefix) {
+  const input = document.getElementById(prefix === "reg" ? "regRestAddress" : "profRestAddress");
+  const dropdown = document.getElementById(prefix === "reg" ? "regRestPlacesDropdown" : "profRestPlacesDropdown");
+  const badge = document.getElementById(prefix === "reg" ? "regRestAddressBadge" : "profRestAddressBadge");
+  if (!input) return;
+
+  clearTimeout(geocodeDebounceTimer);
+  const val = input.value.trim();
+  if (!val || val.length < 2) {
+    if (dropdown) dropdown.style.display = "none";
+    if (badge && !val) {
+      badge.style.display = "none";
+      restaurantGeocache[prefix] = null;
+    }
+    return;
+  }
+
+  geocodeDebounceTimer = setTimeout(async () => {
+    const res = await apiFetch(`/api/client/places/autocomplete?query=${encodeURIComponent(val)}`);
+    if (res && res.ok && res.predictions && res.predictions.length > 0) {
+      if (dropdown) {
+        dropdown.innerHTML = `
+          ${res.predictions.map((p) => {
+            const chosenText = p.secondary_text ? p.secondary_text : p.main_text;
+            return `
+              <div 
+                class="autocomplete-item" 
+                onclick="selectRestaurantAutocompletePlace('${prefix}', '${chosenText.replace(/'/g, "\\'")}', ${p.lat}, ${p.lng})"
+              >
+                <span class="autocomplete-icon">📍</span>
+                <div>
+                  <div class="autocomplete-main">${p.main_text}</div>
+                  <div class="autocomplete-secondary">${p.secondary_text}</div>
+                </div>
+              </div>
+            `;
+          }).join("")}
+          <div class="autocomplete-footer">
+            <span>Sugestões Google Maps</span>
+            <span>CLTempo</span>
           </div>
-        </div>
-      `;
-    })
-    .join("");
+        `;
+        dropdown.style.display = "block";
+      }
+    } else {
+      if (dropdown) dropdown.style.display = "none";
+    }
+  }, 250);
+}
 
-  return `
-    <div class="phone-frame">
-      <div class="phone-header">
-        <div>
-          <div style="font-size:0.7rem; color:var(--text-muted);">Perfil CLT</div>
-          <div style="font-weight:700; font-size:0.9rem;">${currentUser.name}</div>
-        </div>
-        <span class="badge badge-blue">${currentUser.vr_card}</span>
+function selectRestaurantAutocompletePlace(prefix, addressText, lat, lng) {
+  const input = document.getElementById(prefix === "reg" ? "regRestAddress" : "profRestAddress");
+  const dropdown = document.getElementById(prefix === "reg" ? "regRestPlacesDropdown" : "profRestPlacesDropdown");
+  const badge = document.getElementById(prefix === "reg" ? "regRestAddressBadge" : "profRestAddressBadge");
+
+  if (input) input.value = addressText;
+  restaurantGeocache[prefix] = { lat, lng };
+
+  if (dropdown) dropdown.style.display = "none";
+
+  if (badge) {
+    badge.style.display = "block";
+    badge.innerHTML = `
+      <span style="color:var(--emerald-text); font-weight:600; font-size:0.73rem;">
+        ✓ Localizado no Google Maps: <strong>${addressText}</strong> (${lat.toFixed(4)}, ${lng.toFixed(4)})
+      </span>
+    `;
+  }
+}
+
+async function submitRegister(e) {
+  e.preventDefault();
+  const name = document.getElementById("regName")?.value;
+  const email = document.getElementById("regEmail")?.value;
+  const password = document.getElementById("regPassword")?.value;
+  const phone = document.getElementById("regPhone")?.value;
+  const workplace = document.getElementById("regWorkplace")?.value;
+
+  // Coleta as 3 culinárias selecionadas
+  const selectedCuisines = Array.from(document.querySelectorAll(".cuisine-chip.selected"))
+    .map((c) => c.dataset.value);
+
+  // Coleta os Vales-Refeição selecionados (multi-seleção)
+  const selectedVRs = Array.from(document.querySelectorAll(".reg-vr-chip.selected"))
+    .map((c) => c.dataset.value);
+
+  const pref_food_1 = selectedCuisines[0] || "Executivo";
+  const pref_food_2 = selectedCuisines[1] || "Buffet a Quilo";
+  const pref_food_3 = selectedCuisines[2] || "Massas";
+
+  const coords = workplaceGeocache.reg;
+
+  const res = await apiPost("/api/client/register", {
+    name,
+    email,
+    password,
+    phone,
+    workplace,
+    pref_food_1,
+    pref_food_2,
+    pref_food_3,
+    meal_vouchers: selectedVRs.length > 0 ? selectedVRs : ["Alelo", "Ticket"],
+    lat: coords ? coords.lat : undefined,
+    lng: coords ? coords.lng : undefined,
+  });
+
+  if (res && res.ok) {
+    appState.clientAuth.client = res.client;
+    localStorage.setItem("cltempo_client", JSON.stringify(res.client));
+    appState.clientActiveTab = "buscar";
+    showToast(`Conta criada com sucesso! Olá, <strong>${res.client.name}</strong>`, "var(--emerald)");
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+function quickLoginAs(clientId) {
+  if (!appState.data || !appState.data.clients) return;
+  const target = appState.data.clients.find((c) => c.id === clientId);
+  if (target) {
+    appState.clientAuth.client = target;
+    localStorage.setItem("cltempo_client", JSON.stringify(target));
+    appState.clientActiveTab = "buscar";
+    showToast(`Logado como <strong>${target.name}</strong>`, "var(--blue)");
+    refreshClientState();
+    renderApp();
+  }
+}
+
+function clientLogout() {
+  appState.clientAuth.client = null;
+  localStorage.removeItem("cltempo_client");
+  appState.clientActiveTicket = null;
+  appState.clientHistory = [];
+  appState.clientActiveTab = "buscar";
+  showToast("Você saiu da sua conta.", "var(--amber)");
+  renderApp();
+}
+
+function toggleVRSelection(el) {
+  el.classList.toggle("selected");
+  const selected = document.querySelectorAll(".reg-vr-chip.selected");
+  if (selected.length === 0) {
+    el.classList.add("selected");
+    showToast("Selecione pelo menos um vale-refeição.", "var(--amber)");
+  }
+}
+
+function toggleProfileVRSelection(el) {
+  el.classList.toggle("selected");
+  const selected = document.querySelectorAll(".profile-vr-chip.selected");
+  if (selected.length === 0) {
+    el.classList.add("selected");
+    showToast("Selecione pelo menos um vale-refeição.", "var(--amber)");
+  }
+}
+
+function openEditVRModal() {
+  const client = appState.clientAuth.client;
+  if (!client) return;
+
+  const currentVRStr = client.meal_vouchers || client.vr_card || "Alelo, Ticket";
+  const currentVRs = currentVRStr.split(",").map((v) => v.trim().toLowerCase());
+
+  const availableVRs = [
+    "Alelo",
+    "Ticket",
+    "Sodexo / Pluxee",
+    "VR Refeição",
+    "Flash",
+    "Caju",
+    "Swile",
+    "iFood Benefícios",
+  ];
+
+  const modalContainer = document.getElementById("modalContainer");
+  const overlay = document.getElementById("modalOverlay");
+  if (!modalContainer || !overlay) return;
+
+  modalContainer.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+      <h3 style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+        💳 Alterar VRs
+      </h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+
+    <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:1rem;">
+      Selecione quais cartões ou bandeiras você utiliza para almoçar (pode marcar mais de um):
+    </p>
+
+    <div class="vr-grid" id="modalVRGrid" style="margin-bottom:1.25rem;">
+      ${availableVRs.map((vr) => {
+        const isSel = currentVRs.some((cv) => cv.includes(vr.toLowerCase().split("/")[0].trim()) || vr.toLowerCase().includes(cv));
+        return `
+          <div 
+            class="vr-chip modal-vr-chip ${isSel ? "selected" : ""}" 
+            data-value="${vr}"
+            onclick="this.classList.toggle('selected')"
+          >
+            💳 ${vr}
+          </div>
+        `;
+      }).join("")}
+    </div>
+
+    <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+      <button type="button" class="btn btn-outline" onclick="closeModal()">Cancelar</button>
+      <button type="button" class="btn btn-primary" onclick="saveModalVRs()">Salvar VRs</button>
+    </div>
+  `;
+
+  overlay.style.display = "flex";
+}
+
+async function saveModalVRs() {
+  const client = appState.clientAuth.client;
+  if (!client) return;
+
+  const selectedVRs = Array.from(document.querySelectorAll(".modal-vr-chip.selected"))
+    .map((el) => el.dataset.value);
+
+  if (selectedVRs.length === 0) {
+    showToast("Selecione pelo menos um cartão VR.", "var(--rose)");
+    return;
+  }
+
+  const res = await apiPost("/api/client/profile/vr", {
+    client_id: client.id,
+    meal_vouchers: selectedVRs,
+  });
+
+  if (res && res.ok) {
+    appState.clientAuth.client = res.client;
+    localStorage.setItem("cltempo_client", JSON.stringify(res.client));
+    closeModal();
+    showToast("Vales-refeição atualizados com sucesso!", "var(--emerald)");
+    renderApp();
+  }
+}
+
+async function submitProfileUpdate(e) {
+  e.preventDefault();
+  const client = appState.clientAuth.client;
+  if (!client) return;
+
+  const name = document.getElementById("profName")?.value;
+  const phone = document.getElementById("profPhone")?.value;
+  const workplace = document.getElementById("profWorkplace")?.value;
+  const password = document.getElementById("profPassword")?.value;
+
+  const selectedCuisines = Array.from(document.querySelectorAll(".profile-cuisine-chip.selected"))
+    .map((c) => c.dataset.value);
+
+  const selectedVRs = Array.from(document.querySelectorAll(".profile-vr-chip.selected"))
+    .map((c) => c.dataset.value);
+
+  const coords = workplaceGeocache.prof;
+
+  const payload = {
+    client_id: client.id,
+    name,
+    phone,
+    workplace,
+    pref_food_1: selectedCuisines[0] || client.pref_food_1,
+    pref_food_2: selectedCuisines[1] || client.pref_food_2,
+    pref_food_3: selectedCuisines[2] || client.pref_food_3,
+    meal_vouchers: selectedVRs.length > 0 ? selectedVRs : (client.meal_vouchers || "Alelo, Ticket"),
+    password: password || undefined,
+    lat: coords ? coords.lat : undefined,
+    lng: coords ? coords.lng : undefined,
+  };
+
+  const res = await apiPost("/api/client/profile/update", payload);
+  if (res && res.ok) {
+    appState.clientAuth.client = res.client;
+    localStorage.setItem("cltempo_client", JSON.stringify(res.client));
+    showToast("Perfil atualizado com sucesso!", "var(--emerald)");
+    renderApp();
+  }
+}
+
+async function submitProfileDelete() {
+  const client = appState.clientAuth.client;
+  if (!client) return;
+
+  if (!confirm("Tem certeza que deseja apagar seu perfil cadastrado? Essa ação não pode ser desfeita.")) {
+    return;
+  }
+
+  const res = await apiPost("/api/client/profile/delete", { client_id: client.id });
+  if (res && res.ok) {
+    clientLogout();
+    showToast("Perfil excluído com sucesso.", "var(--rose)");
+  }
+}
+
+// ==================== CONTROLE DE NAVEGAÇÃO ====================
+
+function switchMainView(view) {
+  appState.mainView = view;
+  document.querySelectorAll(".nav-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.view === view);
+  });
+  renderApp();
+}
+
+function switchClientTab(tab) {
+  appState.clientActiveTab = tab;
+  renderApp();
+}
+
+function toggleCuisineSelection(chipEl) {
+  const selected = document.querySelectorAll(".cuisine-chip.selected");
+  if (!chipEl.classList.contains("selected") && selected.length >= 3) {
+    showToast("Você já selecionou o limite de 3 tipos de comida preferida.", "var(--amber)");
+    return;
+  }
+  chipEl.classList.toggle("selected");
+}
+
+function toggleProfileCuisineSelection(chipEl) {
+  const selected = document.querySelectorAll(".profile-cuisine-chip.selected");
+  if (!chipEl.classList.contains("selected") && selected.length >= 3) {
+    showToast("Selecione até 3 tipos de comida.", "var(--amber)");
+    return;
+  }
+  chipEl.classList.toggle("selected");
+}
+
+// ==================== AÇÕES DE BUSCA E FILA DO CLIENTE ====================
+
+async function onSearchInput(val) {
+  appState.searchFilters.name = val;
+  await executeSearch();
+  renderApp();
+}
+
+async function onCuisineFilter(val) {
+  appState.searchFilters.cuisine_type = val;
+  await executeSearch();
+  renderApp();
+}
+
+async function onMaxWaitFilter(val) {
+  appState.searchFilters.max_wait_min = Number(val);
+  await executeSearch();
+  renderApp();
+}
+
+async function onRadiusFilter(val) {
+  appState.searchFilters.radius_km = Number(val);
+  await executeSearch();
+  renderApp();
+}
+
+async function onPartySizeFilter(val) {
+  appState.searchFilters.party_size = Number(val);
+  await executeSearch();
+  renderApp();
+}
+
+function openRestaurantModal(restId) {
+  const rest = appState.searchResults.find((r) => r.id === restId) ||
+    appState.data?.restaurants.find((r) => r.id === restId);
+  if (!rest) return;
+
+  appState.selectedModalRestaurant = rest;
+  const overlay = document.getElementById("modalOverlay");
+  const container = document.getElementById("modalContainer");
+
+  container.innerHTML = `
+    <div class="modal-header">
+      <div>
+        <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600;">${rest.category}</div>
+        <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">${rest.name}</div>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="closeModal()">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <!-- Google Maps Embed Interativo -->
+      <iframe
+        class="map-frame"
+        src="${rest.maps_embed_url || `https://maps.google.com/maps?q=${rest.lat},${rest.lng}&hl=pt-BR&z=16&output=embed`}"
+        allowfullscreen=""
+        loading="lazy"
+        title="Localização de ${rest.name}"
+      ></iframe>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; font-size:0.8rem;">
+        <span style="color:var(--text-muted);">📍 ${rest.address}</span>
+        <a href="${rest.maps_external_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rest.name)}`}" target="_blank" class="btn btn-outline btn-sm" style="font-size:0.72rem;">
+          🗺️ Abrir Maps
+        </a>
       </div>
 
-      <!-- User Selector -->
-      <div style="margin-bottom:0.65rem;">
-        <select id="userSelect" onchange="onUserSelectChange(this.value)">
-          ${userOptions}
-        </select>
+      <div style="background:var(--bg-surface); padding:0.85rem; border-radius:12px; margin-bottom:1rem; border:1px solid var(--border);">
+        <div style="display:flex; justify-content:space-between; margin-bottom:0.5rem;">
+          <span style="font-weight:700; font-size:0.85rem;">Tempo de Espera Atual:</span>
+          <span class="badge badge-emerald">~${rest.estimated_wait_min ?? 15} min</span>
+        </div>
+        <div style="font-size:0.75rem; color:var(--text-muted);">
+          Distância: <strong>${rest.distance_meters ?? 300}m</strong> (${rest.distance_walk_min} min a pé do seu escritório)
+        </div>
       </div>
 
-      <!-- Party Size Selector showing Table Category -->
-      <div style="display:flex; justify-content:space-between; align-items:center; background:var(--bg-surface); padding:0.45rem 0.65rem; border-radius:10px; margin-bottom:1rem; border:1px solid var(--border);">
-        <span style="font-size:0.75rem; font-weight:600; color:var(--text-muted);">
-          Pessoas (<strong style="color:var(--text);">Mesa ${targetCat}</strong>):
-        </span>
-        <div style="display:flex; gap:0.2rem;">
+      <!-- Seletor de Mesa (Quantidade de Pessoas) -->
+      <div style="margin-bottom:1.15rem;">
+        <label class="form-label">Selecione o tamanho da mesa:</label>
+        <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:0.4rem;">
           ${[
-            { n: 2, lbl: "2p" },
-            { n: 4, lbl: "4p" },
-            { n: 6, lbl: "6p" },
-            { n: 8, lbl: "8p" },
+            { n: 2, lbl: "1-2 lug.", cat: "1-2" },
+            { n: 4, lbl: "3-4 lug.", cat: "3-4" },
+            { n: 6, lbl: "5-6 lug.", cat: "5+" },
+            { n: 8, lbl: "8+ lug.", cat: "5+" },
           ]
             .map(
               (item) => `
-            <button
-              class="btn btn-sm"
-              style="padding:0.22rem 0.5rem; background:${appState.selectedPartySize === item.n ? "var(--primary)" : "transparent"}; color:${appState.selectedPartySize === item.n ? "#fff" : "var(--text-muted)"};"
-              onclick="setPartySize(${item.n})"
-            >${item.lbl}</button>
+            <button 
+              type="button"
+              class="btn btn-sm ${appState.searchFilters.party_size === item.n ? "btn-primary" : "btn-outline"}"
+              onclick="selectModalPartySize(${item.n})"
+            >
+              ${item.lbl}
+            </button>
           `
             )
             .join("")}
         </div>
       </div>
 
-      ${ticketHTML}
+      <div style="display:flex; flex-direction:column; gap:0.6rem;">
+        <button class="btn btn-primary btn-block btn-lg" onclick="confirmReservation(${rest.id})">
+          ✓ Confirmar Reserva (Entrar na Fila)
+        </button>
+        <a href="${rest.whatsapp_url}" target="_blank" class="btn btn-whatsapp btn-block">
+          💬 Falar com o Restaurante (WhatsApp)
+        </a>
+      </div>
+    </div>
+  `;
 
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.55rem;">
-        <span style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.04em;">
-          Filas para Mesa ${targetCat} lugares
-        </span>
+  overlay.style.display = "flex";
+}
+
+function selectModalPartySize(size) {
+  appState.searchFilters.party_size = size;
+  if (appState.selectedModalRestaurant) {
+    openRestaurantModal(appState.selectedModalRestaurant.id);
+  }
+}
+
+function closeModal() {
+  document.getElementById("modalOverlay").style.display = "none";
+  appState.selectedModalRestaurant = null;
+}
+
+function closeModalOnOverlay(e) {
+  if (e.target.id === "modalOverlay") {
+    closeModal();
+  }
+}
+
+async function confirmReservation(restaurantId) {
+  const client = appState.clientAuth.client;
+  const partySize = appState.searchFilters.party_size || 2;
+
+  const res = await apiPost("/api/client/queue/join", {
+    restaurant_id: restaurantId,
+    client_id: client ? client.id : null,
+    customer_name: client ? client.name : "Cliente CLT",
+    party_size: partySize,
+  });
+
+  if (res && res.ok) {
+    closeModal();
+    showToast(`Reserva confirmada! Código: <strong>#${res.checkin_code}</strong>`, "var(--emerald)");
+    await refreshClientState();
+    // VAI AUTOMATICAMENTE PARA A ABA FILA
+    switchClientTab("fila");
+  }
+}
+
+async function cancelTicket(entryId) {
+  if (!confirm("Deseja realmente sair da fila?")) return;
+  const res = await apiPost("/api/restaurant/action", {
+    entry_id: entryId,
+    action: "cancel",
+    cancel_reason: "Cancelado pelo cliente no app",
+  });
+  if (res && res.ok) {
+    showToast("Você saiu da fila.", "var(--amber)");
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+async function confirmCheckin(entryId) {
+  const res = await apiPost("/api/restaurant/action", {
+    entry_id: entryId,
+    action: "seat",
+  });
+  if (res && res.ok) {
+    showToast("Check-in confirmado! Bom almoço!", "var(--emerald)");
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+// ==================== RENDERS DA INTERFACE CLIENTE ====================
+
+function renderAuthScreen() {
+  const isLogin = appState.clientAuth.authTab === "login";
+
+  const popularCuisines = getAvailableCuisines();
+
+  const availableVRs = [
+    "Alelo", "Ticket", "Sodexo / Pluxee", "VR Refeição",
+    "Flash", "Caju", "Swile", "iFood Benefícios"
+  ];
+
+  return `
+    <div class="auth-box card">
+      <div style="text-align:center; margin-bottom:1.25rem;">
+        <div class="brand-logo" style="margin:0 auto 0.75rem auto; width:52px; height:52px; font-size:1.35rem;">CLT</div>
+        <h2 style="font-size:1.25rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">CLTempo</h2>
+        <p style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">
+          Você com tempo e sem fome.
+        </p>
       </div>
 
-      ${restaurantsHTML}
+      <div class="auth-tabs">
+        <button class="auth-tab ${isLogin ? "active" : ""}" onclick="setAuthTab('login')">Entrar</button>
+        <button class="auth-tab ${!isLogin ? "active" : ""}" onclick="setAuthTab('register')">Cadastrar-se</button>
+      </div>
+
+      ${isLogin ? `
+        <form onsubmit="submitLogin(event)">
+          <div class="form-group">
+            <label class="form-label">E-mail</label>
+            <input type="email" id="loginEmail" class="form-input" placeholder="seu.email@gmail.com" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Senha</label>
+            <input type="password" id="loginPassword" class="form-input" placeholder="••••••••" />
+          </div>
+          <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:0.85rem;">
+            Acessar o CLTempo
+          </button>
+        </form>
+      ` : `
+        <form onsubmit="submitRegister(event)">
+          <div class="form-group">
+            <label class="form-label">Nome Completo</label>
+            <input type="text" id="regName" class="form-input" placeholder="Seu Nome" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label">E-mail</label>
+            <input type="email" id="regEmail" class="form-input" placeholder="seu.email@gmail.com" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Senha</label>
+            <input type="password" id="regPassword" class="form-input" placeholder="Mínimo 4 caracteres" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Telefone (WhatsApp)</label>
+            <input type="tel" id="regPhone" class="form-input" placeholder="21987654321" required />
+          </div>
+          <div class="form-group autocomplete-wrap">
+            <label class="form-label">Local de Trabalho</label>
+            <input 
+              type="text" 
+              id="regWorkplace" 
+              class="form-input" 
+              placeholder="Digite o nome ou endereço do edifício..." 
+              required 
+              autocomplete="off"
+              oninput="handleWorkplaceInput('reg')"
+              onfocus="handleWorkplaceInput('reg')"
+            />
+            <div id="regPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+            <div id="regWorkplaceBadge" style="margin-top:0.35rem; display:none;"></div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Quais as três comidas que você mais AMA?</label>
+            <div class="cuisine-grid">
+              ${popularCuisines.map((c, i) => `
+                <div 
+                  class="cuisine-chip ${i < 3 ? "selected" : ""}" 
+                  data-value="${c.name}"
+                  onclick="toggleCuisineSelection(this)"
+                >
+                  ${c.icon ? c.icon + " " : ""}${c.name}
+                </div>
+              `).join("")}
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+              <span>Quais VRs você possui? </span>
+              <span style="font-size:0.7rem; color:var(--text-muted); font-weight:normal;">Pode marcar mais de um ;)</span>
+            </label>
+            <div class="vr-grid">
+              ${availableVRs.map((vr, i) => `
+                <div 
+                  class="vr-chip reg-vr-chip ${i < 2 ? "selected" : ""}" 
+                  data-value="${vr}"
+                  onclick="toggleVRSelection(this)"
+                >
+                  💳 ${vr}
+                </div>
+              `).join("")}
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:1rem;">
+            Concluir Cadastro
+          </button>
+        </form>
+      `}
+
+      <!-- Atalhos de Demonstração Rápida -->
+      <div style="margin-top:1.5rem; padding-top:1rem; border-top:1px dashed var(--border); text-align:center;">
+        <div style="font-size:0.72rem; color:var(--text-muted); font-weight:700; text-transform:uppercase; margin-bottom:0.45rem;">
+          Acesso Rápido para a Banca (Demo):
+        </div>
+        <div style="display:flex; gap:0.35rem; justify-content:center; flex-wrap:wrap;">
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(1)">Vivian</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(2)">Arthur</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(3)">Carolina</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(4)">Fernando</button>
+        </div>
+      </div>
     </div>
   `;
 }
 
-// 2. Clean Restaurant Operational Dashboard (with Table Category Filters & Inventory)
-function renderRestaurantPanel() {
-  const { restaurants, active_queue, recent_history } = appState.data;
-  const currentRest =
-    restaurants.find((r) => r.id === Number(appState.selectedRestaurantId)) || restaurants[0];
+function renderClientBuscarTab() {
+  const client = appState.clientAuth.client;
+  const f = appState.searchFilters;
 
-  const allRestQueue = active_queue.filter((q) => q.restaurant_id === currentRest.id);
-  const filteredQueue =
-    appState.selectedRestCategoryFilter === "ALL"
-      ? allRestQueue
-      : allRestQueue.filter((q) => q.table_category === appState.selectedRestCategoryFilter);
+  const cuisines = [
+    "TODOS",
+    ...getAvailableCuisines().map((c) => c.name),
+  ];
 
-  const restHistory = recent_history.filter((q) => q.restaurant_id === currentRest.id).slice(0, 5);
-  const qByCat = currentRest.queues_by_category || {
-    "1-2": { waiting: 0, tables: 12 },
-    "3-4": { waiting: 0, tables: 8 },
-    "5+": { waiting: 0, tables: 2 },
-  };
-
-  const restTabs = restaurants
-    .map(
-      (r) => `
-      <button
-        class="btn btn-sm ${r.id === currentRest.id ? "btn-primary" : "btn-outline"}"
-        onclick="selectRestaurant(${r.id})"
-      >
-        ${r.name}
-        <span style="opacity:0.8;">(${r.waiting_count + r.called_count})</span>
-      </button>
-    `
-    )
-    .join("");
-
-  const queueRowsHTML =
-    filteredQueue.length === 0
-      ? `<div style="text-align:center; padding:1.75rem 1rem; color:var(--text-muted); font-size:0.84rem; background:var(--bg-surface); border-radius:12px;">
-          Nenhum grupo aguardando nesta categoria de mesa.
-        </div>`
-      : filteredQueue
-          .map((q) => {
-            const isCalled = q.status === "CALLED";
-            return `
-            <div class="queue-row ${isCalled ? "called" : ""}">
-              <div style="display:flex; align-items:center; gap:0.75rem;">
-                <div class="queue-pos" title="Posição na fila de Mesa ${q.table_category}">
-                  ${isCalled ? "🔔" : `${q.position}º`}
-                </div>
-                <div>
-                  <div style="font-weight:700; font-size:0.9rem; display:flex; align-items:center; gap:0.4rem; flex-wrap:wrap;">
-                    <span>${q.customer_name}</span>
-                    <span class="badge badge-orange">Mesa ${q.table_category} (${q.party_size}p)</span>
-                  </div>
-                  <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.1rem;">
-                    #${q.checkin_code} • Entrou às ${q.joined_at}
-                    ${
-                      isCalled
-                        ? ` • <strong style="color:var(--emerald-text);">Chamado no balcão</strong>`
-                        : ` • ${q.position}º da fila (${q.table_category} lug.) • ~${q.estimated_wait_min} min`
-                    }
-                  </div>
-                </div>
-              </div>
-
-              <div style="display:flex; gap:0.4rem;">
-                ${
-                  !isCalled
-                    ? `<button class="btn btn-primary btn-sm" onclick="triggerQueueAction(${q.id}, 'call')">
-                        Chamar
-                      </button>`
-                    : `<button class="btn btn-emerald btn-sm" onclick="triggerQueueAction(${q.id}, 'seat')">
-                        Check-in
-                      </button>`
-                }
-                <button class="btn btn-outline btn-sm" onclick="triggerQueueAction(${q.id}, 'noshow')" title="Não compareceu">
-                  Ausente
-                </button>
-              </div>
+  const resultsHTML = appState.searchResults.length === 0 ? `
+    <div style="text-align:center; padding:2rem 1rem; color:var(--text-muted); font-size:0.85rem; background:var(--bg-surface); border-radius:14px;">
+      Nenhum restaurante encontrado com os filtros selecionados.<br>
+      <span style="font-size:0.75rem;">Tente aumentar o raio geográfico ou o tempo de espera.</span>
+    </div>
+  ` : appState.searchResults.map((r) => {
+    return `
+      <div class="restaurant-card" onclick="openRestaurantModal(${r.id})">
+        <div class="restaurant-card-header">
+          <div>
+            <div style="font-weight:700; font-size:0.95rem;">${r.name}</div>
+            <div style="font-size:0.74rem; color:var(--text-muted);">
+              ${r.category} • 📍 ${r.distance_meters ?? 300}m (${r.distance_walk_min} min a pé)
             </div>
-          `;
-          })
-          .join("");
+          </div>
+          <span class="badge badge-score" title="Score de relevância baseado no seu perfil e filtros (máximo 100)">
+            ★ Score ${Math.min(100, Math.round(r.score))}/100
+          </span>
+        </div>
 
-  const historyRowsHTML = restHistory
-    .map((h) => {
-      let badge = `<span class="badge badge-emerald">Atendido (${h.perceived_standing_wait_min ?? 2}m em pé)</span>`;
-      if (h.status === "CANCELLED") badge = `<span class="badge badge-amber">Cancelou</span>`;
-      if (h.status === "NO_SHOW") badge = `<span class="badge badge-rose">Ausente</span>`;
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.75rem; flex-wrap:wrap; gap:0.4rem;">
+          <div style="display:flex; gap:0.35rem; align-items:center;">
+            <span class="badge ${r.waiting_in_category > 0 ? "badge-orange" : "badge-emerald"}">
+              ${r.waiting_in_category === 0 ? "Fila livre" : `${r.waiting_in_category} grupos na fila`}
+            </span>
+            <span style="font-size:0.74rem; color:var(--text-muted);">
+              ~${r.estimated_wait_min} min
+            </span>
+          </div>
 
-      return `
-        <tr>
-          <td><strong>${h.customer_name}</strong></td>
-          <td><span class="badge badge-blue">Mesa ${h.table_category || getTableCategory(h.party_size)} (${h.party_size}p)</span></td>
-          <td><code>${h.checkin_code}</code></td>
-          <td>${badge}</td>
-        </tr>
-      `;
-    })
-    .join("");
+          <div style="display:flex; gap:0.35rem;">
+            <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); openRestaurantModal(${r.id})">
+              Ver Mesa & Entrar
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
 
   return `
-    <div>
-      <!-- Top Selector & Table Inventory by Size -->
-      <div class="card">
-        <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.75rem; margin-bottom:1.1rem;">
-          <div style="display:flex; gap:0.4rem; flex-wrap:wrap;">
-            ${restTabs}
-          </div>
-          <button
-            class="btn btn-sm ${currentRest.is_open ? "btn-outline" : "btn-emerald"}"
-            onclick="toggleRestaurantOpen(${currentRest.id})"
+    <!-- Teaser de Recomendações Futuras -->
+    <div class="promo-banner">
+      <div style="font-size:1.25rem;">✨</div>
+      <div>
+        <div style="font-weight:700;">Recomendações para você</div>
+        <div style="font-size:0.72rem; color:var(--text-muted);">
+          Com base em: <strong>${client.pref_food_1}</strong>, <strong>${client.pref_food_2}</strong> e <strong>${client.pref_food_3}</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controles de Busca com Filtros -->
+    <div class="search-controls">
+      <div class="form-group" style="margin-bottom:0.5rem;">
+        <input 
+          type="text" 
+          class="form-input" 
+          placeholder="🔍 Buscar restaurante" 
+          value="${f.name}"
+          oninput="onSearchInput(this.value)"
+        />
+      </div>
+
+      <!-- Filtro por Culinária (Chips) -->
+      <div class="chips-row">
+        ${cuisines.map((c) => `
+          <div 
+            class="filter-chip ${f.cuisine_type === c ? "active" : ""}"
+            onclick="onCuisineFilter('${c}')"
           >
-            ${currentRest.is_open ? "⏸ Pausar Fila" : "▶ Abrir Fila"}
+            ${c}
+          </div>
+        `).join("")}
+      </div>
+
+      <!-- Sliders: Tempo Máximo e Raio Geográfico -->
+      <div class="range-wrap">
+        <span>Tempo Máximo: <strong>${f.max_wait_min >= 60 ? "Até 60 min" : `Até ${f.max_wait_min} min`}</strong></span>
+        <input 
+          type="range" 
+          class="range-input" 
+          min="10" 
+          max="60" 
+          step="5" 
+          value="${f.max_wait_min}" 
+          oninput="onMaxWaitFilter(this.value)" 
+        />
+      </div>
+
+      <div class="range-wrap">
+        <span>Raio Geográfico: <strong>${f.radius_km.toFixed(1)} km</strong></span>
+        <input 
+          type="range" 
+          class="range-input" 
+          min="0.5" 
+          max="5.0" 
+          step="0.5" 
+          value="${f.radius_km}" 
+          oninput="onRadiusFilter(this.value)" 
+        />
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.65rem;">
+      <span style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+        Restaurantes Encontrados (${appState.searchResults.length})
+      </span>
+      <span style="font-size:0.72rem; color:var(--text-muted);">Ordenado por Score (máx. 100) ★</span>
+    </div>
+
+    <div class="restaurants-list">
+      ${resultsHTML}
+    </div>
+  `;
+}
+
+function renderClientFilaTab() {
+  const ticket = appState.clientActiveTicket;
+  const history = appState.clientHistory || [];
+
+  return `
+    <!-- Parte Superior: Reserva Atual -->
+    <div style="margin-bottom:1.5rem;">
+      <div style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:0.55rem;">
+        Reserva Atual
+      </div>
+
+      ${ticket ? `
+        <div class="active-ticket ${ticket.status === "CALLED" || ticket.status === "CHAMADO" ? "called" : ""}">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.4rem;">
+            ${(() => {
+              const st = (ticket.status || "").toUpperCase();
+              if (st === "CHAMADO" || st === "CALLED") {
+                return `<span class="badge badge-emerald" style="font-weight:800; font-size:0.8rem;">🔔 CHAMADO</span>`;
+              } else if (st === "SENTADO" || st === "SEATED") {
+                return `<span class="badge badge-blue" style="font-weight:800; font-size:0.8rem;">🪑 SENTADO</span>`;
+              } else if (st === "CANCELADO" || st === "CANCELLED") {
+                return `<span class="badge badge-amber" style="font-weight:800; font-size:0.8rem;">⚠️ CANCELADO</span>`;
+              } else if (st === "ENCERRADO") {
+                return `<span class="badge badge-gray" style="font-weight:800; font-size:0.8rem;">✅ ENCERRADO</span>`;
+              } else {
+                return `<span class="badge badge-orange" style="font-weight:800; font-size:0.8rem;">⏳ AGUARDANDO</span>`;
+              }
+            })()}
+
+            ${(ticket.table_number && (ticket.status === "CHAMADO" || ticket.status === "CALLED" || ticket.status === "SENTADO" || ticket.status === "SEATED")) ? `
+              <span class="badge badge-purple" style="font-weight:800; font-size:0.82rem;">
+                🪑 Mesa ${ticket.table_number}
+              </span>
+            ` : ""}
+          </div>
+
+          <div style="margin:0.75rem 0 0.35rem 0;">
+            <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+              ${ticket.restaurant_name}
+            </div>
+            <div style="font-size:0.75rem; color:var(--text-muted);">
+              Mesa para ${ticket.party_size} pessoa(s) • Entrou às ${ticket.joined_at}
+              ${(ticket.table_number && (ticket.status === "CHAMADO" || ticket.status === "CALLED" || ticket.status === "SENTADO" || ticket.status === "SEATED")) ? ` • <strong style="color:var(--text);">Dirija-se à Mesa ${ticket.table_number}</strong>` : ""}
+            </div>
+          </div>
+
+          <div class="ticket-metrics-grid">
+            <div class="ticket-metric-box">
+              <div class="ticket-metric-val">${(ticket.status === "CALLED" || ticket.status === "CHAMADO" || ticket.status === "SENTADO" || ticket.status === "SEATED") ? "Agora" : `${ticket.position}º`}</div>
+              <div class="ticket-metric-lbl">Posição</div>
+            </div>
+            <div class="ticket-metric-box">
+              <div class="ticket-metric-val">${(ticket.status === "CALLED" || ticket.status === "CHAMADO" || ticket.status === "SENTADO" || ticket.status === "SEATED") ? "0m" : `~${ticket.estimated_wait_min}m`}</div>
+              <div class="ticket-metric-lbl">Tempo Restante</div>
+            </div>
+            <div class="ticket-metric-box">
+              <div class="ticket-metric-val">${ticket.party_size}p</div>
+              <div class="ticket-metric-lbl">Tamanho</div>
+            </div>
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.85rem;">
+            <a href="${ticket.whatsapp_url}" target="_blank" class="btn btn-whatsapp btn-block">
+              💬 Falar com o Restaurante (WhatsApp)
+            </a>
+
+            ${(ticket.status === "CALLED" || ticket.status === "CHAMADO") ? `
+              <div style="display:flex; gap:0.4rem;">
+                <button class="btn btn-emerald btn-block" onclick="confirmCheckin(${ticket.id})">
+                  Confirmar Chegada
+                </button>
+                <button class="btn btn-rose btn-sm" onclick="cancelTicket(${ticket.id})">
+                  Cancelar
+                </button>
+              </div>
+            ` : (ticket.status === "SENTADO" || ticket.status === "SEATED") ? `
+              <div style="text-align:center; padding:0.6rem; background:rgba(16, 185, 129, 0.08); border-radius:10px; font-size:0.8rem; color:var(--emerald-text); font-weight:700;">
+                🍽️ Bom apetite! Atendimento presencial na Mesa ${ticket.table_number || ""}.
+              </div>
+            ` : `
+              <button class="btn btn-outline btn-block btn-sm" onclick="cancelTicket(${ticket.id})">
+                Sair da Fila
+              </button>
+            `}
+          </div>
+        </div>
+      ` : `
+        <div style="text-align:center; padding:2rem 1.25rem; background:var(--bg-surface); border-radius:16px; border:1px dashed var(--border);">
+          <div style="font-size:2rem; margin-bottom:0.5rem;">☕</div>
+          <div style="font-weight:700; font-size:0.95rem;">Nenhuma reserva ativa</div>
+          <p style="font-size:0.75rem; color:var(--text-muted); margin:0.35rem 0 0.85rem 0;">
+            Você está livre no momento. Que tal escolher onde almoçar hoje?
+          </p>
+          <button class="btn btn-primary btn-sm" onclick="switchClientTab('buscar')">
+            🔍 Buscar Restaurantes
           </button>
         </div>
+      `}
+    </div>
 
-        <!-- 3 Independent Table Queues Summary -->
-        <div class="kpi-strip">
-          <div class="kpi-mini" style="cursor:pointer; border:1px solid ${appState.selectedRestCategoryFilter === "1-2" ? "var(--primary)" : "transparent"};" onclick="setRestCategoryFilter('1-2')">
-            <div class="kpi-mini-label">Mesas 1–2 lug. (${qByCat["1-2"].tables} mesas)</div>
-            <div class="kpi-mini-val" style="color:var(--primary-text);">${qByCat["1-2"].waiting} <span style="font-size:0.75rem; font-weight:500; color:var(--text-muted);">na fila</span></div>
-          </div>
-          <div class="kpi-mini" style="cursor:pointer; border:1px solid ${appState.selectedRestCategoryFilter === "3-4" ? "var(--primary)" : "transparent"};" onclick="setRestCategoryFilter('3-4')">
-            <div class="kpi-mini-label">Mesas 3–4 lug. (${qByCat["3-4"].tables} mesas)</div>
-            <div class="kpi-mini-val" style="color:var(--blue-text);">${qByCat["3-4"].waiting} <span style="font-size:0.75rem; font-weight:500; color:var(--text-muted);">na fila</span></div>
-          </div>
-          <div class="kpi-mini" style="cursor:pointer; border:1px solid ${appState.selectedRestCategoryFilter === "5+" ? "var(--primary)" : "transparent"};" onclick="setRestCategoryFilter('5+')">
-            <div class="kpi-mini-label">Mesas 5+ lug. (${qByCat["5+"].tables} mesas)</div>
-            <div class="kpi-mini-val" style="color:var(--amber-text);">${qByCat["5+"].waiting} <span style="font-size:0.75rem; font-weight:500; color:var(--text-muted);">na fila</span></div>
-          </div>
-          <div class="kpi-mini" style="cursor:pointer;" onclick="setRestCategoryFilter('ALL')">
-            <div class="kpi-mini-label">Atendidos hoje</div>
-            <div class="kpi-mini-val" style="color:var(--emerald-text);">${currentRest.seated_today}</div>
+    <!-- Parte Inferior: Histórico de Reservas -->
+    <div>
+      <div style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:0.55rem;">
+        Histórico de Reservas
+      </div>
+
+      ${history.length === 0 ? `
+        <div style="font-size:0.78rem; color:var(--text-muted); text-align:center; padding:1.5rem; background:var(--bg-card); border-radius:12px; border:1px solid var(--border);">
+          Seu histórico de reservas concluídas aparecerá aqui.
+        </div>
+      ` : `
+        <div class="card" style="padding:0.5rem; overflow-x:auto;">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>Restaurante</th>
+                <th>Mesa</th>
+                <th>Status</th>
+                <th>Horário</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${history.map((h) => {
+                const st = (h.status || "").toUpperCase();
+                let badge = `<span class="badge badge-emerald">Atendido</span>`;
+                if (st === "CANCELADO" || st === "CANCELLED" || st === "NO_SHOW") {
+                  badge = `<span class="badge badge-amber">Cancelado</span>`;
+                } else if (st === "SENTADO" || st === "SEATED" || st === "ENCERRADO") {
+                  badge = `<span class="badge badge-emerald">Atendido</span>`;
+                }
+                return `
+                  <tr>
+                    <td><strong>${h.restaurant_name}</strong></td>
+                    <td>${h.party_size}p (${h.table_category})</td>
+                    <td>${badge}</td>
+                    <td style="color:var(--text-muted);">${h.joined_at}</td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function renderClientPerfilTab() {
+  const client = appState.clientAuth.client;
+
+  const popularCuisines = getAvailableCuisines();
+
+  const availableVRs = [
+    "Alelo", "Ticket", "Sodexo / Pluxee", "VR Refeição",
+    "Flash", "Caju", "Swile", "iFood Benefícios"
+  ];
+
+  const currentPrefs = [client.pref_food_1, client.pref_food_2, client.pref_food_3].filter(Boolean);
+  const currentVRStr = client.meal_vouchers || client.vr_card || "Alelo, Ticket";
+  const currentVRList = currentVRStr.split(",").map((v) => v.trim().toLowerCase());
+
+  return `
+    <div class="card" style="margin-bottom:1rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem;">
+        <div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">Meu Perfil CLTempo</div>
+          <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">${client.name}</div>
+        </div>
+        <div 
+          class="vr-badge-clickable badge badge-blue" 
+          onclick="openEditVRModal()" 
+          title="Clique para alterar seus cartões VR"
+        >
+          💳 ${client.meal_vouchers || client.vr_card}
+        </div>
+      </div>
+
+      <form onsubmit="submitProfileUpdate(event)">
+        <div class="form-group">
+          <label class="form-label">Nome Completo</label>
+          <input type="text" id="profName" class="form-input" value="${client.name}" required />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">E-mail</label>
+          <input type="email" class="form-input" value="${client.email || ""}" disabled style="opacity:0.7;" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Telefone (WhatsApp)</label>
+          <input type="tel" id="profPhone" class="form-input" value="${client.phone || ""}" required />
+        </div>
+
+        <div class="form-group autocomplete-wrap">
+          <label class="form-label">Local de Trabalho</label>
+          <input 
+            type="text" 
+            id="profWorkplace" 
+            class="form-input" 
+            value="${client.workplace || client.company || ""}" 
+            required 
+            autocomplete="off"
+            oninput="handleWorkplaceInput('prof')"
+            onfocus="handleWorkplaceInput('prof')"
+          />
+          <div id="profPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+          <div id="profWorkplaceBadge" style="font-size:0.73rem; margin-top:0.35rem; color:var(--text-muted);">
+            📍 Google Maps: <strong>${client.lat ? Number(client.lat).toFixed(4) : "-22.9035"}, ${client.lng ? Number(client.lng).toFixed(4) : "-43.1780"}</strong> (localizado)
           </div>
         </div>
 
-        <!-- Filter & Quick Call by Table Size -->
-        <div class="card-header" style="margin-top:0.5rem; flex-wrap:wrap;">
-          <div style="display:flex; gap:0.35rem; align-items:center; flex-wrap:wrap;">
-            <button class="btn btn-sm ${appState.selectedRestCategoryFilter === "ALL" ? "btn-primary" : "btn-outline"}" onclick="setRestCategoryFilter('ALL')">
-              Todas (${allRestQueue.length})
-            </button>
-            <button class="btn btn-sm ${appState.selectedRestCategoryFilter === "1-2" ? "btn-primary" : "btn-outline"}" onclick="setRestCategoryFilter('1-2')">
-              Mesa 1–2
-            </button>
-            <button class="btn btn-sm ${appState.selectedRestCategoryFilter === "3-4" ? "btn-primary" : "btn-outline"}" onclick="setRestCategoryFilter('3-4')">
-              Mesa 3–4
-            </button>
-            <button class="btn btn-sm ${appState.selectedRestCategoryFilter === "5+" ? "btn-primary" : "btn-outline"}" onclick="setRestCategoryFilter('5+')">
-              Mesa 5+
-            </button>
-          </div>
-
-          <div style="display:flex; gap:0.35rem; flex-wrap:wrap;">
-            ${["1-2", "3-4", "5+"]
-              .map((cat) => {
-                const hasWait = allRestQueue.some((q) => q.status === "WAITING" && q.table_category === cat);
-                return hasWait
-                  ? `<button class="btn btn-emerald btn-sm" onclick="callNextByCategory(${currentRest.id}, '${cat}')">
-                      🔔 Liberou Mesa ${cat}
-                    </button>`
-                  : "";
-              })
-              .join("")}
+        <div class="form-group">
+          <label class="form-label">3 comidas que você mais gosta</label>
+          <div class="cuisine-grid">
+            ${popularCuisines.map((c) => {
+              const isSelected = currentPrefs.includes(c.name);
+              return `
+                <div 
+                  class="cuisine-chip profile-cuisine-chip ${isSelected ? "selected" : ""}" 
+                  data-value="${c.name}"
+                  onclick="toggleProfileCuisineSelection(this)"
+                >
+                  ${c.icon ? c.icon + " " : ""}${c.name}
+                </div>
+              `;
+            }).join("")}
           </div>
         </div>
 
-        ${queueRowsHTML}
+        <div class="form-group">
+          <label class="form-label">Nova Senha</label>
+          <input type="password" id="profPassword" class="form-input" placeholder="Deixe em branco para não alterar" />
+        </div>
 
-        <!-- Minimal Walk-in Input -->
-        <form onsubmit="addWalkinCustomer(event)" style="margin-top:0.9rem; display:flex; gap:0.5rem;">
-          <input type="text" id="walkinName" placeholder="Adicionar cliente presencial..." style="flex:1;" required />
-          <select id="walkinParty" style="width:110px;">
-            <option value="2" selected>2p (1–2)</option>
-            <option value="4">4p (3–4)</option>
-            <option value="6">6p (5+)</option>
-            <option value="8">8p (5+)</option>
-          </select>
-          <button type="submit" class="btn btn-outline btn-sm">+ Incluir</button>
+        <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:0.85rem;">
+          Salvar Alterações
+        </button>
+      </form>
+    </div>
+
+    <!-- Zona de Ações da Conta -->
+    <div class="card" style="border-color:var(--border);">
+      <div style="display:flex; flex-direction:column; gap:0.65rem;">
+        <button type="button" class="btn btn-outline btn-block" onclick="clientLogout()">
+          🚪 Sair da Conta
+        </button>
+        <button type="button" class="btn btn-rose btn-block" onclick="submitProfileDelete()">
+          🗑️ Apagar Perfil Cadastrado
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderClientAppView() {
+  const client = appState.clientAuth.client;
+  if (!client) {
+    return renderAuthScreen();
+  }
+
+  const activeTab = appState.clientActiveTab;
+  const hasActiveTicket = !!appState.clientActiveTicket;
+
+  let bodyHTML = "";
+  if (activeTab === "buscar") bodyHTML = renderClientBuscarTab();
+  else if (activeTab === "fila") bodyHTML = renderClientFilaTab();
+  else if (activeTab === "perfil") bodyHTML = renderClientPerfilTab();
+
+  return `
+    <div class="phone-frame">
+      <!-- Topo do Celular -->
+      <div class="phone-header">
+        <div>
+          <div style="font-size:0.72rem; color:var(--text-muted); font-weight:600;">
+            📍 ${client.workplace || client.company || "Polo Centro"}
+          </div>
+          <div style="font-weight:800; font-size:0.95rem; font-family:'Plus Jakarta Sans', sans-serif;">
+            ${client.name}
+          </div>
+        </div>
+        <div style="display:flex; gap:0.35rem; align-items:center;">
+          <span class="badge badge-emerald">Online</span>
+        </div>
+      </div>
+
+      <!-- Corpo da Aba Selecionada -->
+      <div class="phone-body">
+        ${bodyHTML}
+      </div>
+
+      <!-- Barra de Navegação Inferior (3 Abas) -->
+      <div class="client-bottom-nav">
+        <button 
+          class="client-tab-btn ${activeTab === "buscar" ? "active" : ""}" 
+          onclick="switchClientTab('buscar')"
+        >
+          <span class="client-tab-icon">🔍</span>
+          <span>Buscar</span>
+        </button>
+
+        <button 
+          class="client-tab-btn ${activeTab === "fila" ? "active" : ""}" 
+          onclick="switchClientTab('fila')"
+          style="position:relative;"
+        >
+          <span class="client-tab-icon">⏳</span>
+          <span>Fila</span>
+          ${hasActiveTicket ? `<span style="position:absolute; top:4px; right:20%; width:8px; height:8px; background:var(--emerald); border-radius:50%;"></span>` : ""}
+        </button>
+
+        <button 
+          class="client-tab-btn ${activeTab === "perfil" ? "active" : ""}" 
+          onclick="switchClientTab('perfil')"
+        >
+          <span class="client-tab-icon">👤</span>
+          <span>Perfil</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+// ==================== INTERFACE RESTAURANTE ====================
+
+function switchRestaurantTab(tab) {
+  appState.restaurantActiveTab = tab;
+  renderApp();
+}
+
+function setRestaurantAuthTab(tab) {
+  appState.restaurantAuth.authTab = tab;
+  renderApp();
+}
+
+function quickLoginRestaurantAs(email, password = "123456") {
+  submitRestaurantLogin(null, email, password);
+}
+
+async function submitRestaurantLogin(e, directEmail = null, directPw = null) {
+  if (e) e.preventDefault();
+  const email = directEmail || document.getElementById("restLoginEmail")?.value;
+  const password = directPw || document.getElementById("restLoginPassword")?.value;
+
+  if (!email || !password) {
+    showToast("Informe e-mail e senha do restaurante", "var(--rose)");
+    return;
+  }
+
+  const res = await apiPost("/api/restaurant/login", { email, password });
+  if (res && res.ok) {
+    appState.restaurantAuth.restaurant = res.restaurant;
+    localStorage.setItem("cltempo_restaurant", JSON.stringify(res.restaurant));
+    showToast(`Bem-vindo, <strong>${res.restaurant.name}</strong>!`, "var(--emerald)");
+    appState.restaurantActiveTab = "fila";
+    renderApp();
+  }
+}
+
+function toggleRestaurantRegisterVR(vr) {
+  const current = appState.restaurantAuth.registerVRs;
+  if (current.includes(vr)) {
+    appState.restaurantAuth.registerVRs = current.filter((x) => x !== vr);
+  } else {
+    appState.restaurantAuth.registerVRs = [...current, vr];
+  }
+  renderApp();
+}
+
+function toggleRestaurantProfileVR(vr) {
+  const current = appState.restaurantAuth.profileVRs;
+  if (current.includes(vr)) {
+    appState.restaurantAuth.profileVRs = current.filter((x) => x !== vr);
+  } else {
+    appState.restaurantAuth.profileVRs = [...current, vr];
+  }
+  renderApp();
+}
+
+function selectRestaurantRegisterCuisine(cuisineName) {
+  appState.restaurantAuth.registerCuisine = cuisineName;
+  const inputEl = document.getElementById("regRestCuisine");
+  if (inputEl) inputEl.value = cuisineName;
+  document.querySelectorAll(".reg-rest-cuisine-chip").forEach((chip) => {
+    chip.classList.toggle("selected", chip.dataset.value === cuisineName);
+  });
+}
+
+function selectRestaurantProfileCuisine(cuisineName) {
+  const rest = appState.restaurantAuth.restaurant;
+  if (rest) {
+    rest.cuisine_type = cuisineName;
+    rest.category = cuisineName;
+  }
+  const inputEl = document.getElementById("profRestCuisine");
+  if (inputEl) inputEl.value = cuisineName;
+  document.querySelectorAll(".prof-rest-cuisine-chip").forEach((chip) => {
+    chip.classList.toggle("selected", chip.dataset.value === cuisineName);
+  });
+}
+
+async function submitRestaurantRegister(e) {
+  e.preventDefault();
+  const name = document.getElementById("regRestName")?.value;
+  const email = document.getElementById("regRestEmail")?.value;
+  const password = document.getElementById("regRestPassword")?.value;
+  const phone = document.getElementById("regRestPhone")?.value;
+  const cuisine = document.getElementById("regRestCuisine")?.value || appState.restaurantAuth.registerCuisine || "Executivo";
+  const address = document.getElementById("regRestAddress")?.value;
+
+  const turnover_1_2 = Number(document.getElementById("regRestTurnover12")?.value || 25);
+  const turnover_3_4 = Number(document.getElementById("regRestTurnover34")?.value || 35);
+  const turnover_5_plus = Number(document.getElementById("regRestTurnover5Plus")?.value || 45);
+
+  const tables_1_2 = Number(document.getElementById("regRestTables12")?.value || 6);
+  const tables_3_4 = Number(document.getElementById("regRestTables34")?.value || 6);
+  const tables_5_plus = Number(document.getElementById("regRestTables5Plus")?.value || 4);
+
+  const coords = restaurantGeocache.reg;
+
+  const payload = {
+    name,
+    email,
+    password,
+    phone,
+    cuisine_type: cuisine,
+    category: cuisine,
+    vr_accepted: appState.restaurantAuth.registerVRs,
+    address,
+    lat: coords ? coords.lat : undefined,
+    lng: coords ? coords.lng : undefined,
+    turnover_1_2,
+    turnover_3_4,
+    turnover_5_plus,
+    tables_1_2,
+    tables_3_4,
+    tables_5_plus,
+  };
+
+  const res = await apiPost("/api/restaurant/register", payload);
+  if (res && res.ok) {
+    appState.restaurantAuth.restaurant = res.restaurant;
+    localStorage.setItem("cltempo_restaurant", JSON.stringify(res.restaurant));
+    showToast(`Restaurante <strong>${res.restaurant.name}</strong> cadastrado com sucesso!`, "var(--emerald)");
+    appState.restaurantActiveTab = "fila";
+    renderApp();
+  }
+}
+
+function restaurantLogout() {
+  localStorage.removeItem("cltempo_restaurant");
+  appState.restaurantAuth.restaurant = null;
+  appState.restaurantActiveTab = "fila";
+  showToast("Você saiu da conta do restaurante.", "var(--blue)");
+  renderApp();
+}
+
+async function submitRestaurantProfileUpdate(e) {
+  e.preventDefault();
+  const rest = appState.restaurantAuth.restaurant;
+  if (!rest) return;
+
+  const name = document.getElementById("profRestName")?.value;
+  const phone = document.getElementById("profRestPhone")?.value;
+  const cuisine = document.getElementById("profRestCuisine")?.value || rest.cuisine_type || rest.category || "Executivo";
+  const address = document.getElementById("profRestAddress")?.value;
+  const t1 = Number(document.getElementById("profRestTurnover12")?.value || 25);
+  const t2 = Number(document.getElementById("profRestTurnover34")?.value || 35);
+  const t3 = Number(document.getElementById("profRestTurnover5Plus")?.value || 45);
+
+  const tb1 = Number(document.getElementById("profRestTables12")?.value || rest.tables_1_2 || 6);
+  const tb2 = Number(document.getElementById("profRestTables34")?.value || rest.tables_3_4 || 6);
+  const tb3 = Number(document.getElementById("profRestTables5Plus")?.value || rest.tables_5_plus || 4);
+
+  const coords = restaurantGeocache.prof;
+
+  const payload = {
+    name,
+    phone,
+    cuisine_type: cuisine,
+    category: cuisine,
+    address,
+    lat: coords ? coords.lat : rest.lat,
+    lng: coords ? coords.lng : rest.lng,
+    vr_accepted: appState.restaurantAuth.profileVRs,
+    turnover_1_2: t1,
+    turnover_3_4: t2,
+    turnover_5_plus: t3,
+    tables_1_2: tb1,
+    tables_3_4: tb2,
+    tables_5_plus: tb3,
+  };
+
+  const res = await apiPost("/api/restaurant/profile/update", { restaurant_id: rest.id, ...payload });
+  if (res && res.ok) {
+    appState.restaurantAuth.restaurant = res.restaurant;
+    localStorage.setItem("cltempo_restaurant", JSON.stringify(res.restaurant));
+    const stateRes = await apiFetch("/api/state");
+    if (stateRes) {
+      appState.data = stateRes;
+    }
+    showToast("Informações e mesas do restaurante atualizadas!", "var(--emerald)");
+    renderApp();
+  }
+}
+
+async function submitRestaurantProfileDelete() {
+  const rest = appState.restaurantAuth.restaurant;
+  if (!rest) return;
+
+  if (confirm(`Tem certeza que deseja excluir o cadastro de "${rest.name}"? Esta ação cancelará filas ativas e removerá o restaurante do sistema.`)) {
+    const res = await apiPost("/api/restaurant/profile/delete", { restaurant_id: rest.id });
+    if (res && res.ok) {
+      restaurantLogout();
+    }
+  }
+}
+
+async function toggleCurrentRestOpen() {
+  const rest = appState.restaurantAuth.restaurant;
+  if (!rest) return;
+
+  const res = await apiPost("/api/restaurant/toggle", { restaurant_id: rest.id });
+  if (res && res.ok) {
+    rest.is_open = res.is_open;
+    appState.restaurantAuth.restaurant = { ...rest };
+    localStorage.setItem("cltempo_restaurant", JSON.stringify(appState.restaurantAuth.restaurant));
+    showToast(res.is_open ? "Fila digital ABERTA para novos clientes!" : "Fila digital PAUSADA.", "var(--blue)");
+    renderApp();
+  }
+}
+
+// ==================== OPERAÇÕES DE FILA E SALÃO ====================
+
+function openCallClientModal(entryId) {
+  const activeQueue = appState.data?.active_queue || [];
+  const entry = activeQueue.find((q) => q.id === entryId);
+  if (!entry) return;
+
+  const restId = appState.restaurantAuth.restaurant?.id || entry.restaurant_id;
+  const allTables = appState.data?.restaurant_tables || [];
+  const restTables = allTables.filter((t) => t.restaurant_id === restId);
+
+  // Encontra a menor mesa livre correspondente ao porte
+  const freeCatTables = restTables.filter(
+    (t) => t.table_type === entry.table_category && t.status === "LIVRE"
+  );
+  freeCatTables.sort((a, b) => a.table_number - b.table_number);
+  const suggestedTable = freeCatTables[0] ? freeCatTables[0].table_number : null;
+
+  appState.restaurantCallingModal = {
+    entry,
+    suggestedTable,
+    restTables,
+  };
+  renderApp();
+}
+
+function closeCallClientModal() {
+  appState.restaurantCallingModal = null;
+  renderApp();
+}
+
+async function confirmCallClient(entryId) {
+  const select = document.getElementById("selectCallTable");
+  if (!select) return;
+  const tableNum = Number(select.value);
+
+  const modalData = appState.restaurantCallingModal;
+  const targetTable = modalData?.restTables?.find((t) => t.table_number === tableNum);
+
+  if (targetTable && targetTable.status !== "LIVRE") {
+    showToast(`A Mesa ${tableNum} já está ocupada ou indisponível! Selecione uma mesa livre.`, "var(--rose)");
+    return;
+  }
+
+  const res = await apiPost("/api/restaurant/call", {
+    entry_id: entryId,
+    table_number: tableNum,
+  });
+
+  if (res && res.ok) {
+    showToast(`🔔 Cliente chamado para a <strong>Mesa ${res.table_number}</strong>!`, "var(--emerald)");
+    closeCallClientModal();
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+function openChangeTableModal(entryId, currentTable) {
+  const activeQueue = appState.data?.active_queue || [];
+  const entry = activeQueue.find((q) => q.id === entryId);
+  if (!entry) return;
+
+  const restId = appState.restaurantAuth.restaurant?.id || entry.restaurant_id;
+  const allTables = appState.data?.restaurant_tables || [];
+  const restTables = allTables.filter((t) => t.restaurant_id === restId);
+
+  appState.restaurantChangeTableModal = {
+    entry,
+    currentTable,
+    restTables,
+  };
+  renderApp();
+}
+
+function closeChangeTableModal() {
+  appState.restaurantChangeTableModal = null;
+  renderApp();
+}
+
+async function confirmChangeTable(entryId) {
+  const select = document.getElementById("selectNewTable");
+  if (!select) return;
+  const newTableNum = Number(select.value);
+
+  const modalData = appState.restaurantChangeTableModal;
+  const targetTable = modalData?.restTables?.find((t) => t.table_number === newTableNum);
+
+  if (targetTable && targetTable.status !== "LIVRE" && targetTable.table_number !== modalData.currentTable) {
+    showToast(`A Mesa ${newTableNum} já está ocupada ou indisponível! Selecione uma mesa livre.`, "var(--rose)");
+    return;
+  }
+
+  const res = await apiPost("/api/restaurant/change-table", {
+    entry_id: entryId,
+    new_table_number: newTableNum,
+  });
+
+  if (res && res.ok) {
+    showToast(`Mesa alterada com sucesso para <strong>Mesa ${newTableNum}</strong>!`, "var(--emerald)");
+    closeChangeTableModal();
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+async function confirmSeatClient(entryId) {
+  const res = await apiPost("/api/restaurant/seat", { entry_id: entryId });
+  if (res && res.ok) {
+    showToast("Check-in confirmado! Cliente acomodado na mesa.", "var(--emerald)");
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+async function cancelClientReservation(entryId) {
+  const reason = prompt("Motivo do cancelamento:", "Cancelado pelo restaurante / Balcão");
+  if (reason === null) return;
+
+  const res = await apiPost("/api/restaurant/cancel", {
+    entry_id: entryId,
+    cancel_reason: reason || "Cancelado pelo restaurante",
+  });
+
+  if (res && res.ok) {
+    showToast("Reserva cancelada e mesa liberada.", "var(--amber)");
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+async function finishTableOrder(tableId, tableNumber, entryId) {
+  if (confirm(`Deseja encerrar o atendimento e liberar a Mesa ${tableNumber}?`)) {
+    const res = await apiPost("/api/restaurant/finish-table", {
+      table_id: tableId,
+      table_number: tableNumber,
+      entry_id: entryId,
+      restaurant_id: appState.restaurantAuth.restaurant?.id,
+    });
+    if (res && res.ok) {
+      showToast(`Mesa ${tableNumber} desocupada e liberada para novos clientes!`, "var(--emerald)");
+      await refreshClientState();
+      renderApp();
+    }
+  }
+}
+
+async function setTableOperationalStatus(tableId, targetStatus) {
+  const res = await apiPost("/api/restaurant/table/status", {
+    table_id: tableId,
+    status: targetStatus,
+  });
+  if (res && res.ok) {
+    showToast(`Status da Mesa ${res.table_number} alterado para ${targetStatus}.`, "var(--blue)");
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+async function submitWalkinClient(e) {
+  e.preventDefault();
+  const rest = appState.restaurantAuth.restaurant;
+  if (!rest) return;
+
+  const nameInput = document.getElementById("restWalkinName");
+  const partySelect = document.getElementById("restWalkinParty");
+  if (!nameInput) return;
+
+  const res = await apiPost("/api/restaurant/walkin", {
+    restaurant_id: rest.id,
+    customer_name: nameInput.value,
+    party_size: Number(partySelect?.value || 2),
+  });
+
+  if (res && res.ok) {
+    showToast(`Cliente presencial adicionado à fila!`, "var(--emerald)");
+    nameInput.value = "";
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+// ==================== RENDERS DA INTERFACE RESTAURANTE ====================
+
+function renderRestaurantView() {
+  return renderRestaurantAppView();
+}
+
+function renderRestaurantAppView() {
+  const rest = appState.restaurantAuth.restaurant;
+  if (!rest) {
+    return renderRestaurantAuthScreen();
+  }
+  return renderRestaurantMainScreen();
+}
+
+function renderRestaurantAuthScreen() {
+  const authTab = appState.restaurantAuth.authTab;
+  const vrOptions = [
+    "Alelo", "Ticket", "Sodexo / Pluxee", "VR Refeição",
+    "Flash", "Caju", "Swile", "iFood Benefícios"
+  ];
+  const selectedVRs = appState.restaurantAuth.registerVRs || [];
+  const allCuisines = getAvailableCuisines();
+  const selectedCuisine = appState.restaurantAuth.registerCuisine || "Executivo";
+
+  return `
+    <div class="auth-box card" style="max-width:440px;">
+      <div style="text-align:center; margin-bottom:1.25rem;">
+        <div class="brand-logo" style="margin:0 auto 0.75rem auto; width:52px; height:52px; font-size:1.45rem; background:linear-gradient(135deg, var(--primary) 0%, #d97706 100%); color:#fff; display:flex; align-items:center; justify-content:center; border-radius:14px; box-shadow:0 4px 12px rgba(234,88,12,0.3);">
+          🧑‍🍳
+        </div>
+        <h2 style="font-size:1.25rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+          CLTempo Restaurante
+        </h2>
+        <p style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">
+          Seu restaurante em primeiro lugar.
+        </p>
+      </div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab ${authTab === "login" ? "active" : ""}" onclick="setRestaurantAuthTab('login')">
+          Entrar
+        </button>
+        <button class="auth-tab ${authTab === "register" ? "active" : ""}" onclick="setRestaurantAuthTab('register')">
+          Cadastrar-se
+        </button>
+      </div>
+
+      ${authTab === "login" ? `
+        <!-- Formulário de Login -->
+        <form onsubmit="submitRestaurantLogin(event)">
+          <div class="form-group">
+            <label class="form-label">E-mail</label>
+            <input type="email" id="restLoginEmail" class="form-input" placeholder="restaurante@gmail.com" required />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Senha</label>
+            <input type="password" id="restLoginPassword" class="form-input" placeholder="••••••••" required />
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:0.85rem;">
+            Acessar o CLTempo Restaurante
+          </button>
+        </form>
+      ` : `
+        <!-- Formulário de Cadastro -->
+        <form onsubmit="submitRestaurantRegister(event)">
+          <div class="form-group">
+            <label class="form-label">Nome do Restaurante</label>
+            <input type="text" id="regRestName" class="form-input" placeholder="ex: Sabor do Centro" required />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">E-mail</label>
+            <input type="email" id="regRestEmail" class="form-input" placeholder="restaurante@cltempo.com.br" required />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Senha</label>
+            <input type="password" id="regRestPassword" class="form-input" placeholder="Mínimo 4 caracteres" minlength="4" required />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Telefone (WhatsApp)</label>
+            <input type="text" id="regRestPhone" class="form-input" placeholder="21998876655" required />
+          </div>
+
+          <!-- Tipo de Culinária (Chips) -->
+          <div class="form-group">
+            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+              <span>Tipo de Culinária</span>
+            </label>
+            <input type="hidden" id="regRestCuisine" value="${selectedCuisine}" />
+            <div class="cuisine-grid">
+              ${allCuisines.map((c) => {
+                const sel = selectedCuisine === c.name;
+                return `
+                  <div 
+                    class="cuisine-chip reg-rest-cuisine-chip ${sel ? "selected" : ""}" 
+                    data-value="${c.name}"
+                    onclick="selectRestaurantRegisterCuisine('${c.name}')"
+                  >
+                    ${c.icon ? c.icon + " " : ""}${c.name}
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          <div class="form-group autocomplete-wrap">
+            <label class="form-label">Endereço</label>
+            <input 
+              type="text" 
+              id="regRestAddress" 
+              class="form-input" 
+              placeholder="Digite o logradouro ou edifício do restaurante..." 
+              required 
+              autocomplete="off"
+              oninput="handleRestaurantAddressInput('reg')"
+              onfocus="handleRestaurantAddressInput('reg')"
+            />
+            <div id="regRestPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+            <div id="regRestAddressBadge" style="margin-top:0.35rem; display:none;"></div>
+          </div>
+
+          <!-- Vales-Refeição Aceitos -->
+          <div class="form-group">
+            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+              <span>Quais VRs o restaurante aceita?</span>
+              <span style="font-size:0.7rem; color:var(--text-muted); font-weight:normal;">Pode marcar mais de um ;)</span>
+            </label>
+            <div class="vr-grid">
+              ${vrOptions.map((vr) => {
+                const sel = selectedVRs.includes(vr);
+                return `
+                  <div class="vr-chip ${sel ? "selected" : ""}" onclick="toggleRestaurantRegisterVR('${vr}')">
+                    💳 ${vr}
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          <!-- Tempos Médios de Giro por Tipo de Mesa -->
+          <div style="margin:1rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+            ⏱️ Tempo Médio de Giro (minutos)
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1rem;">
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Até 2 lug.</label>
+              <input type="number" id="regRestTurnover12" class="form-input" value="25" min="5" max="120" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Até 4 lug.</label>
+              <input type="number" id="regRestTurnover34" class="form-input" value="35" min="5" max="120" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mais de 5 lug.</label>
+              <input type="number" id="regRestTurnover5Plus" class="form-input" value="45" min="5" max="120" required />
+            </div>
+          </div>
+
+          <!-- Quantidade de Mesas Disponíveis por Tipo -->
+          <div style="margin:0.5rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+            🪑 Quantidade de Mesas
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1.25rem;">
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mesas 1-2</label>
+              <input type="number" id="regRestTables12" class="form-input" value="6" min="1" max="50" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mesas 3-4</label>
+              <input type="number" id="regRestTables34" class="form-input" value="6" min="1" max="50" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mesas 5+</label>
+              <input type="number" id="regRestTables5Plus" class="form-input" value="4" min="1" max="50" required />
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:1rem;">
+            Concluir Cadastro
+          </button>
+        </form>
+      `}
+
+      <!-- Atalhos de Demonstração Rápida -->
+      <div style="margin-top:1.5rem; padding-top:1rem; border-top:1px dashed var(--border); text-align:center;">
+        <div style="font-size:0.72rem; color:var(--text-muted); font-weight:700; text-transform:uppercase; margin-bottom:0.45rem;">
+          Acesso Rápido para a Banca (Demo):
+        </div>
+        <div style="display:flex; gap:0.35rem; justify-content:center; flex-wrap:wrap;">
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('bistro@cltempo.com.br')">🍲 Bistrô do Ouvidor</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('grao@cltempo.com.br')">🥩 Grão & Brasa</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('pasta@cltempo.com.br')">🍝 Pasta & Basta</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('sushi@cltempo.com.br')">🍣 Koji Sushi</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('verde@cltempo.com.br')">🥗 Verde & Fresco</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderRestaurantMainScreen() {
+  const rest = appState.restaurantAuth.restaurant;
+  const activeTab = appState.restaurantActiveTab;
+
+  // Carrega mesas e filas deste restaurante do estado consolidado
+  const allTables = appState.data?.restaurant_tables || [];
+  const restTables = allTables.filter((t) => t.restaurant_id === rest.id);
+  const alocadas = restTables.filter((t) => t.status === "ALOCADA");
+
+  const allQueue = appState.data?.active_queue || [];
+  const restWaiting = allQueue.filter(
+    (q) => q.restaurant_id === rest.id && (q.status === "AGUARDANDO" || q.status === "WAITING")
+  );
+
+  let bodyHTML = "";
+  if (activeTab === "fila") bodyHTML = renderRestaurantFilaTab(restTables);
+  else if (activeTab === "mesas") bodyHTML = renderRestaurantMesasTab(restTables);
+  else if (activeTab === "perfil") bodyHTML = renderRestaurantPerfilTab();
+
+  return `
+    <div class="restaurant-frame">
+      <!-- Topo do Restaurante -->
+      <div class="restaurant-header">
+        <div>
+          <div style="font-size:0.72rem; color:var(--text-muted); font-weight:600;">
+            ${rest.cuisine_type || rest.category || "Restaurante"}
+          </div>
+          <div style="font-weight:800; font-size:1.05rem; font-family:'Plus Jakarta Sans', sans-serif;">
+            ${rest.name}
+          </div>
+        </div>
+
+        <button 
+          class="btn ${rest.is_open ? "btn-emerald" : "btn-rose"} btn-sm" 
+          onclick="toggleCurrentRestOpen()"
+          style="font-size:0.72rem; padding:0.35rem 0.65rem;"
+        >
+          ${rest.is_open ? "🟢 Fila Aberta" : "🔴 Fila Pausada"}
+        </button>
+      </div>
+
+      <!-- Corpo da Aba Selecionada -->
+      <div class="restaurant-body">
+        ${bodyHTML}
+      </div>
+
+      <!-- Barra de Navegação Inferior (3 Abas: Fila | Mesas | Perfil) -->
+      <div class="restaurant-bottom-nav">
+        <button 
+          class="restaurant-tab-btn ${activeTab === "fila" ? "active" : ""}" 
+          onclick="switchRestaurantTab('fila')"
+        >
+          <span class="restaurant-tab-icon">⏳</span>
+          <span>Fila</span>
+          ${restWaiting.length > 0 ? `<span class="nav-counter">${restWaiting.length}</span>` : ""}
+        </button>
+
+        <button 
+          class="restaurant-tab-btn ${activeTab === "mesas" ? "active" : ""}" 
+          onclick="switchRestaurantTab('mesas')"
+        >
+          <span class="restaurant-tab-icon">🪑</span>
+          <span>Mesas</span>
+          <span class="nav-counter" style="background:${alocadas.length > 0 ? "#9333ea" : "var(--emerald)"};">${alocadas.length}/${restTables.length}</span>
+        </button>
+
+        <button 
+          class="restaurant-tab-btn ${activeTab === "perfil" ? "active" : ""}" 
+          onclick="switchRestaurantTab('perfil')"
+        >
+          <span class="restaurant-tab-icon">👤</span>
+          <span>Perfil</span>
+        </button>
+      </div>
+
+      <!-- Modais Operacionais -->
+      ${renderRestaurantCallModal()}
+      ${renderRestaurantChangeTableModal()}
+    </div>
+  `;
+}
+
+function renderRestaurantFilaTab(restTables) {
+  const rest = appState.restaurantAuth.restaurant;
+  const activeQueue = appState.data?.active_queue || [];
+  const restQueue = activeQueue.filter((q) => q.restaurant_id === rest.id);
+
+  // Parte Superior: Fila de Espera (AGUARDANDO) ordenada pelo cliente que está esperando há MAIS tempo
+  const waitingEntries = restQueue.filter(
+    (q) => q.status === "AGUARDANDO" || q.status === "WAITING"
+  );
+  waitingEntries.sort((a, b) => {
+    const waitA = a.elapsed_wait_min ?? calcElapsedMinutes(a.joined_at);
+    const waitB = b.elapsed_wait_min ?? calcElapsedMinutes(b.joined_at);
+    return waitB - waitA || a.id - b.id;
+  });
+
+  // Parte Inferior: Chamados (CHAMADO) ordenados pelo chamado há mais tempo
+  const calledEntries = restQueue.filter(
+    (q) => q.status === "CHAMADO" || q.status === "CALLED"
+  );
+  calledEntries.sort((a, b) => {
+    const callA = a.elapsed_called_min ?? calcElapsedMinutes(a.called_at);
+    const callB = b.elapsed_called_min ?? calcElapsedMinutes(b.called_at);
+    return callB - callA || (a.called_at || "").localeCompare(b.called_at || "");
+  });
+
+  return `
+    <!-- PARTE SUPERIOR: Fila de Espera (AGUARDANDO) -->
+    <div style="margin-bottom:1.5rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem;">
+        <div style="font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+          Fila de Espera (${waitingEntries.length})
+        </div>
+      </div>
+
+      ${waitingEntries.length === 0 ? `
+        <div style="text-align:center; padding:1.75rem 1rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
+          Nenhum cliente aguardando na fila.
+        </div>
+      ` : waitingEntries.map((q, idx) => {
+        // Encontra a menor mesa livre correspondente ao porte
+        const freeCatTables = restTables.filter(
+          (t) => t.table_type === q.table_category && t.status === "LIVRE"
+        );
+        freeCatTables.sort((a, b) => a.table_number - b.table_number);
+        const minFreeTable = freeCatTables[0] ? freeCatTables[0].table_number : null;
+        const waitMin = q.elapsed_wait_min ?? calcElapsedMinutes(q.joined_at);
+
+        return `
+          <div style="background:var(--bg-surface); border:1px solid var(--border); border-left:4px solid var(--primary); border-radius:12px; padding:0.85rem; margin-bottom:0.6rem;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.35rem;">
+              <div>
+                <div style="font-weight:800; font-size:0.95rem;">
+                  ${idx + 1}º ${q.customer_name}
+                </div>
+                <div style="font-size:0.73rem; color:var(--text-muted);">
+                  Mesa ${q.table_category} (${q.party_size}p) • Chegou às ${q.joined_at}
+                </div>
+              </div>
+
+              ${minFreeTable !== null ? `
+                <span class="badge badge-emerald" style="font-weight:700; font-size:0.75rem;">
+                  MESA ${minFreeTable}
+                </span>
+              ` : `
+                <span class="badge badge-rose" style="font-weight:700; font-size:0.75rem;">
+                  MESA INDISPONÍVEL
+                </span>
+              `}
+            </div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
+              <span style="font-size:0.75rem; color:var(--amber); font-weight:700;">
+                ⏱️ Esperando na fila há <strong>${waitMin} min</strong>
+              </span>
+
+              <button 
+                class="btn btn-primary btn-sm" 
+                onclick="openCallClientModal(${q.id})"
+                style="padding:0.35rem 0.8rem; font-size:0.78rem;"
+              >
+                Chamar Cliente
+              </button>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+
+    <!-- PARTE INFERIOR: Chamados no Balcão (CHAMADO) -->
+    <div style="margin-bottom:1.5rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem;">
+        <div style="font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+          Clientes chamados (${calledEntries.length})
+        </div>
+      </div>
+
+      ${calledEntries.length === 0 ? `
+        <div style="text-align:center; padding:1.25rem 1rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
+          Nenhum cliente chamado no balcão no momento.
+        </div>
+      ` : calledEntries.map((q) => {
+        const callMin = q.elapsed_called_min ?? calcElapsedMinutes(q.called_at);
+
+        return `
+          <div style="background:var(--bg-surface); border:1px solid var(--border); border-left:4px solid var(--emerald); border-radius:12px; padding:0.85rem; margin-bottom:0.6rem;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+              <div>
+                <div style="font-weight:800; font-size:0.95rem;">
+                  🔔 ${q.customer_name}
+                </div>
+                <div style="font-size:0.73rem; color:var(--text-muted);">
+                  Mesa ${q.table_category} (${q.party_size}p) • Chamado há <strong>${callMin} min</strong> (às ${q.called_at || q.joined_at})
+                </div>
+              </div>
+
+              <span class="badge badge-purple" style="font-weight:800; font-size:0.82rem;">
+                Mesa ${q.table_number || "?"}
+              </span>
+            </div>
+
+            <div style="display:flex; gap:0.4rem; margin-top:0.75rem;">
+              <button 
+                class="btn btn-outline btn-sm" 
+                onclick="openChangeTableModal(${q.id}, ${q.table_number || 1})"
+                style="flex:1; font-size:0.74rem; padding:0.35rem 0.2rem;"
+              >
+                🔄 Alterar Mesa
+              </button>
+
+              <button 
+                class="btn btn-emerald btn-sm" 
+                onclick="confirmSeatClient(${q.id})"
+                style="flex:1.2; font-size:0.74rem; padding:0.35rem 0.2rem;"
+              >
+                ✓ Check-in (Sentado)
+              </button>
+
+              <button 
+                class="btn btn-rose btn-sm" 
+                onclick="cancelClientReservation(${q.id})"
+                style="font-size:0.74rem; padding:0.35rem 0.5rem;"
+                title="Cancelar reserva"
+              >
+                ✕ Cancelar
+              </button>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+
+    <!-- Walk-in Presencial (Balcão) -->
+    <div style="padding:0.9rem; background:var(--bg-surface); border-radius:12px; border:1px solid var(--border);">
+      <div style="font-weight:700; font-size:0.82rem; margin-bottom:0.45rem;">
+        ➕ Adicionar Walk-in Presencial (Sem Celular):
+      </div>
+      <form onsubmit="submitWalkinClient(event)" style="display:flex; gap:0.4rem; flex-wrap:wrap;">
+        <input type="text" id="restWalkinName" class="form-input" placeholder="Nome do cliente" required style="flex:2; font-size:0.82rem;" />
+        <select id="restWalkinParty" class="form-select" style="flex:1; font-size:0.82rem;">
+          <option value="2">2p (1-2)</option>
+          <option value="4">4p (3-4)</option>
+          <option value="6">6p (5+)</option>
+        </select>
+        <button type="submit" class="btn btn-primary btn-sm" style="font-size:0.8rem;">Adicionar</button>
+      </form>
+    </div>
+  `;
+}
+
+function renderRestaurantMesasTab(restTables) {
+  // Três seções: ALOCADA, LIVRE, INDISPONÍVEL
+  const alocadas = restTables.filter((t) => t.status === "ALOCADA");
+  const livres = restTables.filter((t) => t.status === "LIVRE");
+  const indisponiveis = restTables.filter((t) => t.status === "INDISPONÍVEL");
+
+  return `
+    <!-- PARTE SUPERIOR: Mesas Alocadas -->
+    <div style="margin-bottom:1.5rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+        <div style="font-size:0.75rem; font-weight:700; color:#9333ea; text-transform:uppercase;">
+          Mesas Alocadas (${alocadas.length})
+        </div>
+      </div>
+
+      ${alocadas.length === 0 ? `
+        <div style="text-align:center; padding:1.25rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
+          Nenhuma mesa alocada no momento.
+        </div>
+      ` : alocadas.map((t) => `
+        <div class="table-card table-card-alocada">
+          <div>
+            <div class="table-num-pill">
+              <span>Mesa ${t.table_number}</span>
+              <span class="badge badge-purple" style="font-size:0.7rem;">${t.table_type} lug.</span>
+            </div>
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.2rem;">
+              👤 <strong>${t.customer_name || "Cliente Ocupante"}</strong>
+              ${t.checkin_at ? ` • Sentou às ${t.checkin_at}` : (t.called_at ? ` • Chamado às ${t.called_at}` : "")}
+            </div>
+          </div>
+
+          <button 
+            class="btn btn-sm btn-outline" 
+            onclick="finishTableOrder(${t.id}, ${t.table_number}, ${t.entry_id || 0})"
+            style="font-size:0.74rem; padding:0.35rem 0.65rem;"
+          >
+            Encerrar Pedido
+          </button>
+        </div>
+      `).join("")}
+    </div>
+
+    <!-- PARTE DO MEIO: Mesas Livres -->
+    <div style="margin-bottom:1.5rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+        <div style="font-size:0.75rem; font-weight:700; color:var(--emerald-text); text-transform:uppercase;">
+          Mesas Livres (${livres.length})
+        </div>
+      </div>
+
+      ${livres.length === 0 ? `
+        <div style="text-align:center; padding:1.25rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
+          Todas as mesas estão ocupadas ou indisponíveis!
+        </div>
+      ` : livres.map((t) => `
+        <div class="table-card table-card-livre">
+          <div>
+            <div class="table-num-pill">
+              <span>Mesa ${t.table_number}</span>
+              <span class="badge badge-emerald" style="font-size:0.7rem;">${t.table_type} lug.</span>
+            </div>
+            <div style="font-size:0.74rem; color:var(--emerald-text); margin-top:0.15rem;">
+              Disponível para alocação
+            </div>
+          </div>
+
+          <button 
+            class="btn btn-sm btn-outline" 
+            onclick="setTableOperationalStatus(${t.id}, 'INDISPONÍVEL')"
+            style="font-size:0.74rem; padding:0.35rem 0.65rem;"
+          >
+            Indisponível
+          </button>
+        </div>
+      `).join("")}
+    </div>
+
+    <!-- PARTE INFERIOR: Mesas Indisponíveis -->
+    <div style="margin-bottom:1rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+        <div style="font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+          Mesas Indisponíveis (${indisponiveis.length})
+        </div>
+      </div>
+
+      ${indisponiveis.length === 0 ? `
+        <div style="text-align:center; padding:1rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
+          Nenhuma mesa marcada como indisponível.
+        </div>
+      ` : indisponiveis.map((t) => `
+        <div class="table-card table-card-indisponivel">
+          <div>
+            <div class="table-num-pill">
+              <span>Mesa ${t.table_number}</span>
+              <span class="badge badge-gray" style="font-size:0.7rem;">${t.table_type} lug.</span>
+            </div>
+            <div style="font-size:0.74rem; color:var(--text-muted); margin-top:0.15rem;">
+              Bloqueada para uso
+            </div>
+          </div>
+
+          <button 
+            class="btn btn-sm btn-emerald" 
+            onclick="setTableOperationalStatus(${t.id}, 'LIVRE')"
+            style="font-size:0.74rem; padding:0.35rem 0.65rem;"
+          >
+            Liberar Mesa
+          </button>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderRestaurantPerfilTab() {
+  const rest = appState.restaurantAuth.restaurant;
+  if (!rest) return "";
+
+  const vrOptions = ["Alelo", "Sodexo", "Ticket Restaurante", "VR Refeição", "Flash", "iFood Benefícios", "Caju"];
+  const currentVRStr = rest.vr_accepted || "";
+  if (!appState.restaurantAuth.profileVRs || appState.restaurantAuth.profileVRs.length === 0) {
+    appState.restaurantAuth.profileVRs = currentVRStr.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const selectedVRs = appState.restaurantAuth.profileVRs;
+  const allCuisines = getAvailableCuisines();
+  const currentCuisine = rest.cuisine_type || rest.category || "Executivo";
+
+  return `
+    <div style="display:flex; flex-direction:column; gap:1.25rem;">
+      <div class="card" style="border-color:var(--border);">
+      <div style="font-size:0.75rem; color:var(--text-muted);">Meu Perfil CLTempo</div>
+        <h3 style="font-size:1.05rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif; margin-bottom:0.75rem;">
+          ${rest.name}
+        </h3>
+
+        <form onsubmit="submitRestaurantProfileUpdate(event)">
+          <div class="form-group">
+            <label class="form-label">Nome</label>
+            <input type="text" id="profRestName" class="form-input" value="${rest.name}" required />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Telefone (WhatsApp)</label>
+            <input type="text" id="profRestPhone" class="form-input" value="${rest.phone_whatsapp || ""}" required />
+          </div>
+
+          <!-- Tipo de Culinária (Chips) -->
+          <div class="form-group">
+            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+              <span>Tipo de Culinária</span>
+            </label>
+            <input type="hidden" id="profRestCuisine" value="${currentCuisine}" />
+            <div class="cuisine-grid">
+              ${allCuisines.map((c) => {
+                const sel = currentCuisine === c.name;
+                return `
+                  <div 
+                    class="cuisine-chip prof-rest-cuisine-chip ${sel ? "selected" : ""}" 
+                    data-value="${c.name}"
+                    onclick="selectRestaurantProfileCuisine('${c.name}')"
+                  >
+                    ${c.icon ? c.icon + " " : ""}${c.name}
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          <div class="form-group autocomplete-wrap">
+            <label class="form-label">Endereço</label>
+            <input 
+              type="text" 
+              id="profRestAddress" 
+              class="form-input" 
+              value="${rest.address || ""}" 
+              required 
+              autocomplete="off"
+              oninput="handleRestaurantAddressInput('prof')"
+              onfocus="handleRestaurantAddressInput('prof')"
+            />
+            <div id="profRestPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+            <div id="profRestAddressBadge" style="font-size:0.73rem; margin-top:0.35rem; color:var(--text-muted);">
+              📍 Google Maps: <strong>${rest.lat ? Number(rest.lat).toFixed(4) : "-22.9030"}, ${rest.lng ? Number(rest.lng).toFixed(4) : "-43.1770"}</strong> (localizado)
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">VRs Aceitos</label>
+            <div class="vr-grid">
+              ${vrOptions.map((vr) => {
+                const sel = selectedVRs.includes(vr);
+                return `
+                  <div class="vr-chip ${sel ? "selected" : ""}" onclick="toggleRestaurantProfileVR('${vr}')">
+                    <span>${sel ? "✓" : "+"}</span>
+                    <span>${vr}</span>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          <div style="margin:1rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+            ⏱️ Tempo Médio de Giro (minutos)
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1rem;">
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Até 2 lug.</label>
+              <input type="number" id="profRestTurnover12" class="form-input" value="${rest.turnover_1_2 || 25}" min="5" max="120" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Até 4 lug.</label>
+              <input type="number" id="profRestTurnover34" class="form-input" value="${rest.turnover_3_4 || 35}" min="5" max="120" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mais de 5 lug.</label>
+              <input type="number" id="profRestTurnover5Plus" class="form-input" value="${rest.turnover_5_plus || 45}" min="5" max="120" required />
+            </div>
+          </div>
+
+          <div style="margin:1rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
+            🪑 Quantidade de Mesas
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1.25rem;">
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mesas 1-2</label>
+              <input type="number" id="profRestTables12" class="form-input" value="${rest.tables_1_2 || 6}" min="1" max="50" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mesas 3-4</label>
+              <input type="number" id="profRestTables34" class="form-input" value="${rest.tables_3_4 || 6}" min="1" max="50" required />
+            </div>
+            <div>
+              <label class="form-label" style="font-size:0.7rem;">Mesas 5+</label>
+              <input type="number" id="profRestTables5Plus" class="form-input" value="${rest.tables_5_plus || 4}" min="1" max="50" required />
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block">
+            Salvar Alterações
+          </button>
         </form>
       </div>
 
-      <!-- Compact History -->
-      <div class="card">
-        <div class="card-title" style="margin-bottom:0.75rem;">Últimos Atendimentos</div>
-        <table class="table-clean">
-          <thead>
-            <tr>
-              <th>Cliente</th>
-              <th>Categoria de Mesa</th>
-              <th>Código</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${historyRowsHTML}
-          </tbody>
-        </table>
+      <!-- Ações de Conta -->
+      <div class="card" style="border-color:var(--border);">
+        <div style="display:flex; flex-direction:column; gap:0.65rem;">
+          <button type="button" class="btn btn-outline btn-block" onclick="restaurantLogout()">
+            🚪 Sair da Conta
+          </button>
+          <button type="button" class="btn btn-rose btn-block" onclick="submitRestaurantProfileDelete()">
+            🗑️ Apagar Perfil Cadastrado
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+// ==================== MODAIS DE CHAMADA E TROCA DE MESA ====================
+
+function renderRestaurantCallModal() {
+  const modal = appState.restaurantCallingModal;
+  if (!modal) return "";
+
+  const { entry, suggestedTable, restTables } = modal;
+
+  return `
+    <div class="modal-overlay" onclick="if(event.target === this) closeCallClientModal()">
+      <div class="modal-card" style="max-width:400px; background:#ffffff !important; color:#0f172a !important; border-radius:18px; padding:1.4rem; box-shadow:0 25px 50px -12px rgba(0,0,0,0.35); border:1px solid #e2e8f0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+          <h3 style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif; color:#0f172a; margin:0;">
+            Chamar Cliente para a Mesa
+          </h3>
+          <button class="btn btn-outline btn-sm" onclick="closeCallClientModal()" style="border:1px solid #cbd5e1; color:#64748b; padding:0.25rem 0.55rem; font-size:1rem; border-radius:8px; background:#f8fafc;">✕</button>
+        </div>
+
+        <div style="background:#f8fafc; padding:0.95rem; border-radius:12px; margin-bottom:1.15rem; border:1px solid #e2e8f0;">
+          <div style="font-weight:800; font-size:1.05rem; color:#0f172a;">${entry.customer_name}</div>
+          <div style="font-size:0.78rem; color:#475569; margin-top:0.25rem;">
+            Porte: <strong style="color:#0f172a;">Mesa ${entry.table_category} (${entry.party_size} pessoa(s))</strong>
+          </div>
+          <div style="font-size:0.78rem; color:#475569; margin-top:0.15rem;">
+            ⏱️ Aguardando desde <strong>${entry.joined_at}</strong>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" style="color:#334155; font-weight:700;">Selecione a Mesa para Alocação:</label>
+          <select id="selectCallTable" class="form-select" style="font-size:0.92rem; padding:0.65rem; background:#ffffff; color:#0f172a; border:1.5px solid #cbd5e1; border-radius:10px;">
+            ${restTables.map((t) => {
+              const isFree = t.status === "LIVRE";
+              const isSuggested = t.table_number === suggestedTable;
+              const isSameType = t.table_type === entry.table_category;
+              return `
+                <option 
+                  value="${t.table_number}" 
+                  ${isSuggested ? "selected" : ""}
+                  ${!isFree ? "disabled" : ""}
+                  style="color:${!isFree ? "#94a3b8" : "#0f172a"};"
+                >
+                  Mesa ${t.table_number} (${t.table_type} lug.) — ${t.status}${isSuggested ? " ⭐ (Sugestão)" : (!isSameType ? " [Outro porte]" : "")}
+                </option>
+              `;
+            }).join("")}
+          </select>
+          <div style="font-size:0.74rem; color:#64748b; margin-top:0.45rem;">
+            * Apenas mesas com status <strong>LIVRE</strong> podem ser alocadas. Mesas ocupadas não podem ser selecionadas.
+          </div>
+        </div>
+
+        <div style="display:flex; gap:0.6rem; margin-top:1.35rem;">
+          <button class="btn btn-outline btn-block btn-sm" onclick="closeCallClientModal()" style="border:1px solid #cbd5e1; color:#475569; background:#f8fafc; font-weight:600;">
+            Cancelar
+          </button>
+          <button class="btn btn-emerald btn-block btn-sm" onclick="confirmCallClient(${entry.id})" style="font-weight:700;">
+            🔔 Confirmar Chamada
+          </button>
+        </div>
       </div>
     </div>
   `;
 }
 
-// 3. Clean Canvas Validation Metrics View
-function renderMetricsView() {
-  const { metrics, leads } = appState.data;
+function renderRestaurantChangeTableModal() {
+  const modal = appState.restaurantChangeTableModal;
+  if (!modal) return "";
+
+  const { entry, currentTable, restTables } = modal;
+
+  return `
+    <div class="modal-overlay" onclick="if(event.target === this) closeChangeTableModal()">
+      <div class="modal-card" style="max-width:400px; background:#ffffff !important; color:#0f172a !important; border-radius:18px; padding:1.4rem; box-shadow:0 25px 50px -12px rgba(0,0,0,0.35); border:1px solid #e2e8f0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+          <h3 style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif; color:#0f172a; margin:0;">
+            Alterar Mesa Alocada
+          </h3>
+          <button class="btn btn-outline btn-sm" onclick="closeChangeTableModal()" style="border:1px solid #cbd5e1; color:#64748b; padding:0.25rem 0.55rem; font-size:1rem; border-radius:8px; background:#f8fafc;">✕</button>
+        </div>
+
+        <div style="background:#f8fafc; padding:0.95rem; border-radius:12px; margin-bottom:1.15rem; border:1px solid #e2e8f0;">
+          <div style="font-weight:800; font-size:1.05rem; color:#0f172a;">${entry.customer_name}</div>
+          <div style="font-size:0.78rem; color:#475569; margin-top:0.25rem;">
+            Mesa atual: <strong style="color:#0f172a;">Mesa ${currentTable}</strong> (${entry.table_category} lug.)
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" style="color:#334155; font-weight:700;">Selecione a Nova Mesa Livre:</label>
+          <select id="selectNewTable" class="form-select" style="font-size:0.92rem; padding:0.65rem; background:#ffffff; color:#0f172a; border:1.5px solid #cbd5e1; border-radius:10px;">
+            ${restTables.map((t) => {
+              const isFree = t.status === "LIVRE";
+              const isCurrent = t.table_number === currentTable;
+              return `
+                <option 
+                  value="${t.table_number}" 
+                  ${isCurrent ? "selected" : ""}
+                  ${!isFree && !isCurrent ? "disabled" : ""}
+                  style="color:${!isFree && !isCurrent ? "#94a3b8" : "#0f172a"};"
+                >
+                  Mesa ${t.table_number} (${t.table_type} lug.) — ${t.status}${isCurrent ? " (Atual)" : ""}
+                </option>
+              `;
+            }).join("")}
+          </select>
+          <div style="font-size:0.74rem; color:#64748b; margin-top:0.45rem;">
+            * A mesa atual será liberada e a nova mesa será marcada como ALOCADA.
+          </div>
+        </div>
+
+        <div style="display:flex; gap:0.6rem; margin-top:1.35rem;">
+          <button class="btn btn-outline btn-block btn-sm" onclick="closeChangeTableModal()" style="border:1px solid #cbd5e1; color:#475569; background:#f8fafc; font-weight:600;">
+            Cancelar
+          </button>
+          <button class="btn btn-primary btn-block btn-sm" onclick="confirmChangeTable(${entry.id})" style="font-weight:700;">
+            Confirmar Troca
+          </button>
+        </div>
+      </div>
+  `;
+}
+
+// ==================== INTERFACE ADMINISTRADOR ====================
+
+function renderAdminView() {
+  const metrics = appState.data?.metrics;
+  if (!metrics) return `<div class="card">Carregando métricas de validação do Canvas...</div>`;
+
   const m1 = metrics.m1_restaurant_conversion;
   const m2 = metrics.m2_weekly_entries_per_user;
   const m3 = metrics.m3_dropout_rate;
   const m4 = metrics.m4_standing_wait_reduction;
 
-  const userBreakdownRows = m2.user_breakdown
-    .map(
-      (u) => `
-      <tr>
-        <td><strong>${u.name}</strong></td>
-        <td>${u.company}</td>
-        <td><span class="badge badge-orange">${u.entries_count} entradas</span></td>
-      </tr>
-    `
-    )
-    .join("");
-
-  const leadsRows = leads
-    .map((l) => {
-      let badgeClass = "badge-blue";
-      let statusLabel = "Abordado";
-      if (l.status === "ONBOARDED") {
-        badgeClass = "badge-emerald";
-        statusLabel = "Piloto Ativo";
-      } else if (l.status === "IN_NEGOTIATION") {
-        badgeClass = "badge-amber";
-        statusLabel = "Negociação";
-      } else if (l.status === "DECLINED") {
-        badgeClass = "badge-rose";
-        statusLabel = "Recusou";
-      }
-
-      return `
-        <tr>
-          <td><strong>${l.restaurant_name}</strong></td>
-          <td>${l.contact_person}</td>
-          <td><span class="badge ${badgeClass}">${statusLabel}</span></td>
-          <td>
-            ${
-              l.status !== "ONBOARDED"
-                ? `<button class="btn btn-outline btn-sm" onclick="updateLeadStatus(${l.id}, 'ONBOARDED')">
-                    Ativar Piloto
-                  </button>`
-                : `<span style="font-size:0.75rem; color:var(--emerald-text);">✓ Parceiro</span>`
-            }
-          </td>
-        </tr>
-      `;
-    })
-    .join("");
-
   return `
-    <div>
-      <div class="section-label">
-        <span>Validação de Hipóteses do MVP Canvas</span>
-        <span>Atualizado em tempo real</span>
+    <div style="display:flex; flex-direction:column; gap:1.25rem;">
+      <div class="card">
+        <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700; text-transform:uppercase;">
+          Painel de Validação das 4 Métricas do MVP Canvas
+        </div>
+        <h2 style="font-size:1.35rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+          CLTempo — Empreendedorismo UFRJ
+        </h2>
       </div>
 
-      <div class="metrics-grid">
-        <div class="metric-kpi-card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600;">1. Conversão de Restaurantes</div>
-          <div class="kpi-number" style="color:var(--emerald-text);">${m1.conversion_pct}%</div>
-          <div class="progress-bar">
-            <div class="progress-fill" style="width:${Math.min(100, m1.conversion_pct)}%; background:var(--emerald);"></div>
-          </div>
-          <div style="font-size:0.76rem; color:var(--text-muted);">
-            ${m1.onboarded} de ${m1.total_approached} abordados no piloto
+      <!-- Grid das 4 Métricas do Canvas -->
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:1rem;">
+        <div class="card">
+          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M1. Conversão Restaurantes</div>
+          <div style="font-size:1.75rem; font-weight:800; color:var(--primary);">${m1.conversion_pct}%</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            Meta: >${m1.target_pct}% • ${m1.onboarded} de ${m1.total_approached} aderiram
           </div>
         </div>
 
-        <div class="metric-kpi-card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600;">2. Entradas / Usuário / Semana</div>
-          <div class="kpi-number" style="color:var(--primary-text);">${m2.avg_entries_per_week}x</div>
-          <div class="progress-bar">
-            <div class="progress-fill" style="width:${Math.min(100, (m2.avg_entries_per_week / 5) * 100)}%; background:var(--primary);"></div>
-          </div>
-          <div style="font-size:0.76rem; color:var(--text-muted);">
-            ${m2.total_entries} entradas (${m2.active_users} usuários ativos)
+        <div class="card">
+          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M2. Frequência CLT / Semana</div>
+          <div style="font-size:1.75rem; font-weight:800; color:var(--emerald);">${m2.avg_entries_per_week}x</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            Meta: >${m2.target_entries}x • ${m2.total_entries} entradas totais
           </div>
         </div>
 
-        <div class="metric-kpi-card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600;">3. Taxa de Desistência da Fila</div>
-          <div class="kpi-number" style="color:var(--amber-text);">${m3.dropout_pct}%</div>
-          <div class="progress-bar">
-            <div class="progress-fill" style="width:${Math.min(100, m3.dropout_pct)}%; background:var(--amber);"></div>
+        <div class="card">
+          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M3. Taxa de Desistência</div>
+          <div style="font-size:1.75rem; font-weight:800; color:${m3.dropout_pct <= m3.max_acceptable_pct ? "var(--emerald)" : "var(--rose)"};">
+            ${m3.dropout_pct}%
           </div>
-          <div style="font-size:0.76rem; color:var(--text-muted);">
-            ${m3.cancelled_count} cancelamentos e ${m3.noshow_count} ausências
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            Teto aceitável: <${m3.max_acceptable_pct}% • ${m3.cancelled_count} cancelamentos
           </div>
         </div>
 
-        <div class="metric-kpi-card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:600;">4. Redução de Espera em Pé</div>
-          <div class="kpi-number" style="color:var(--blue-text);">-${m4.reduction_pct}%</div>
-          <div class="progress-bar">
-            <div class="progress-fill" style="width:${Math.min(100, m4.reduction_pct)}%; background:var(--blue);"></div>
-          </div>
-          <div style="font-size:0.76rem; color:var(--text-muted);">
-            De ${m4.avg_standing_without_app_min} min para ${m4.avg_standing_with_app_min} min em pé
+        <div class="card">
+          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M4. Redução de Espera em Pé</div>
+          <div style="font-size:1.75rem; font-weight:800; color:var(--blue);">${m4.reduction_pct}%</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            Reduziu de ${m4.avg_standing_without_app_min}m para ~${m4.avg_standing_with_app_min}m (${m4.minutes_saved_per_lunch} min salvos)
           </div>
         </div>
       </div>
 
-      <div class="split-grid" style="grid-template-columns: 1fr 1.3fr;">
-        <div class="card">
-          <div class="card-title" style="margin-bottom:0.75rem;">Recorrência Semanal (CLTs)</div>
-          <table class="table-clean">
-            <thead>
-              <tr>
-                <th>Colaborador</th>
-                <th>Polo</th>
-                <th>Uso</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${userBreakdownRows}
-            </tbody>
-          </table>
-        </div>
-
-        <div class="card">
-          <div class="card-title" style="margin-bottom:0.75rem;">Funil de Restaurantes Abordados</div>
-          <table class="table-clean">
+      <!-- Funil de Prospecção de Restaurantes -->
+      <div class="card">
+        <h3 style="font-size:1.05rem; font-weight:800; margin-bottom:0.75rem;">Funil de Parcerias do Polo</h3>
+        <div style="overflow-x:auto;">
+          <table class="history-table">
             <thead>
               <tr>
                 <th>Restaurante</th>
                 <th>Contato</th>
                 <th>Status</th>
-                <th>Ação</th>
+                <th>Observações</th>
               </tr>
             </thead>
             <tbody>
-              ${leadsRows}
+              ${(m1.leads || []).map((l) => `
+                <tr>
+                  <td><strong>${l.restaurant_name}</strong></td>
+                  <td>${l.contact_person}</td>
+                  <td><span class="badge ${l.status === "ONBOARDED" ? "badge-emerald" : (l.status === "IN_NEGOTIATION" ? "badge-blue" : "badge-amber")}">${l.status}</span></td>
+                  <td style="color:var(--text-muted); font-size:0.75rem;">${l.notes || "-"}</td>
+                </tr>
+              `).join("")}
             </tbody>
           </table>
-
-          <form onsubmit="addNewLead(event)" style="margin-top:0.85rem; display:flex; gap:0.45rem;">
-            <input type="text" id="newLeadName" placeholder="Novo restaurante..." style="flex:1;" required />
-            <input type="text" id="newLeadContact" placeholder="Contato" style="width:130px;" />
-            <select id="newLeadStatus" style="width:140px;">
-              <option value="APPROACHED">Abordado</option>
-              <option value="IN_NEGOTIATION">Negociação</option>
-              <option value="ONBOARDED">Piloto Ativo</option>
-            </select>
-            <button type="submit" class="btn btn-primary btn-sm">+ Adicionar</button>
-          </form>
         </div>
       </div>
     </div>
   `;
 }
 
-// 4. Clean Architecture Summary View
-function renderArchitectureView() {
+// ==================== RENDER PRINCIPAL ====================
+
+function renderSplitView() {
   return `
-    <div>
-      <div class="metrics-grid">
-        <div class="metric-kpi-card">
-          <span class="badge badge-orange">Filas por Capacidade</span>
-          <div style="font-weight:700; margin:0.5rem 0 0.3rem;">Particionamento por Mesa</div>
-          <p style="font-size:0.8rem; color:var(--text-muted);">
-            Filas independentes para <strong>1–2 lugares</strong>, <strong>3–4 lugares</strong> e <strong>5+ lugares</strong>, ponderadas pelo inventário de mesas de cada porte no restaurante.
-          </p>
-        </div>
-
-        <div class="metric-kpi-card">
-          <span class="badge badge-emerald">Comunicação em Tempo Real</span>
-          <div style="font-weight:700; margin:0.5rem 0 0.3rem;">Server-Sent Events (SSE)</div>
-          <p style="font-size:0.8rem; color:var(--text-muted);">
-            Conexão persistente (<code>/api/events</code>) que atualiza a posição na fila e envia o alerta de mesa pronta instantaneamente.
-          </p>
-        </div>
-
-        <div class="metric-kpi-card">
-          <span class="badge badge-blue">Camada de Apresentação</span>
-          <div style="font-weight:700; margin:0.5rem 0 0.3rem;">SPA Web Responsiva</div>
-          <p style="font-size:0.8rem; color:var(--text-muted);">
-            Interface única para o App do CLT e o Balcão do Restaurante, sem exigir download na loja durante o piloto de 3–4 semanas.
-          </p>
-        </div>
-
-        <div class="metric-kpi-card">
-          <span class="badge badge-amber">Persistência &amp; Métricas</span>
-          <div style="font-weight:700; margin:0.5rem 0 0.3rem;">SQLite / PostgreSQL</div>
-          <p style="font-size:0.8rem; color:var(--text-muted);">
-            Registra eventos de entrada, chamada, check-in, desistência e tempo percebido em pé para validar o Canvas.
-          </p>
-        </div>
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap:1.5rem; max-width:1200px; margin:0 auto;">
+      <div>
+        <h3 style="margin-bottom:0.75rem; text-align:center; font-size:1rem; font-weight:700;">📱 Visão Cliente</h3>
+        ${renderClientAppView()}
       </div>
-
-      <div class="split-grid" style="grid-template-columns: 1fr 1fr;">
-        <div class="card">
-          <div class="card-title" style="margin-bottom:0.75rem;">Modelo de Dados (Tabelas)</div>
-          <table class="table-clean">
-            <thead>
-              <tr>
-                <th>Tabela</th>
-                <th>Descrição</th>
-                <th>Métrica</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><code>users</code></td>
-                <td>Perfil CLT, empresa e vale-refeição</td>
-                <td>M2</td>
-              </tr>
-              <tr>
-                <td><code>restaurants</code></td>
-                <td>Inventário de mesas (<code>1-2</code>, <code>3-4</code>, <code>5+</code>) e giro médio</td>
-                <td>M4</td>
-              </tr>
-              <tr>
-                <td><code>queue_entries</code></td>
-                <td>Tickets segmentados por <code>table_category</code></td>
-                <td>M2, M3, M4</td>
-              </tr>
-              <tr>
-                <td><code>restaurant_leads</code></td>
-                <td>Funil de restaurantes abordados no polo</td>
-                <td>M1</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="card">
-          <div class="card-title" style="margin-bottom:0.75rem;">Escopo do MVP vs. Evolução Futura</div>
-          <table class="table-clean">
-            <thead>
-              <tr>
-                <th>Fase</th>
-                <th>Funcionalidades</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><span class="badge badge-emerald">MVP Atual</span></td>
-                <td>Listagem do polo, fila segmentada por capacidade de mesa, alerta em tempo real e métricas do Canvas.</td>
-              </tr>
-              <tr>
-                <td><span class="badge badge-blue">Fase 2</span></td>
-                <td>Mapa virtual integrado (Google Maps), recomendação personalizada e opção Premium / Fast-Pass.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <div>
+        <h3 style="margin-bottom:0.75rem; text-align:center; font-size:1rem; font-weight:700;">🧑‍🍳 Visão Restaurante</h3>
+        ${renderRestaurantView()}
       </div>
     </div>
   `;
 }
-
-// Helpers
-window.onUserSelectChange = function (val) {
-  appState.selectedUserId = parseInt(val, 10);
-  renderApp();
-};
-
-window.setPartySize = function (size) {
-  appState.selectedPartySize = size;
-  renderApp();
-};
-
-window.selectRestaurant = function (id) {
-  appState.selectedRestaurantId = id;
-  renderApp();
-};
-
-window.setRestCategoryFilter = function (cat) {
-  appState.selectedRestCategoryFilter = cat;
-  renderApp();
-};
-
-window.callNextByCategory = function (restaurantId, category) {
-  const nextWaiting = appState.data.active_queue.find(
-    (q) => q.restaurant_id === restaurantId && q.status === "WAITING" && q.table_category === category
-  );
-  if (nextWaiting) {
-    triggerQueueAction(nextWaiting.id, "call");
-  }
-};
-
-window.promptCancelTicket = function (entryId) {
-  const reason = window.prompt(
-    "Motivo do cancelamento (registra na Métrica 3 do Canvas):",
-    "Reunião de última hora"
-  );
-  if (reason !== null) {
-    triggerQueueAction(entryId, "cancel", {
-      cancel_reason: reason.trim() || "Cancelado pelo usuário",
-    });
-  }
-};
-
-window.joinQueue = joinQueue;
-window.triggerQueueAction = triggerQueueAction;
-window.submitStandingWaitFeedback = submitStandingWaitFeedback;
-window.addWalkinCustomer = addWalkinCustomer;
-window.toggleRestaurantOpen = toggleRestaurantOpen;
-window.updateLeadStatus = updateLeadStatus;
-window.addNewLead = addNewLead;
 
 function renderApp() {
   const root = document.getElementById("appRoot");
-  if (!root || !appState.data) return;
+  if (!root) return;
 
-  if (appState.currentView === "split") {
-    root.innerHTML = `
-      <div class="split-grid">
-        <div>
-          <div class="section-label">
-            <span>📱 App do Usuário CLT</span>
-            <span>11h30 • No Escritório</span>
-          </div>
-          ${renderCLTPanel()}
-        </div>
-        <div>
-          <div class="section-label">
-            <span>🧑‍🍳 Painel do Restaurante</span>
-            <span>Filas por Capacidade de Mesa</span>
-          </div>
-          ${renderRestaurantPanel()}
-        </div>
-      </div>
-    `;
-  } else if (appState.currentView === "clt") {
-    root.innerHTML = `<div class="single-phone-wrapper">${renderCLTPanel()}</div>`;
-  } else if (appState.currentView === "restaurant") {
-    root.innerHTML = renderRestaurantPanel();
-  } else if (appState.currentView === "metrics") {
-    root.innerHTML = renderMetricsView();
-  } else if (appState.currentView === "arch") {
-    root.innerHTML = renderArchitectureView();
+  const view = appState.mainView;
+  if (view === "client") {
+    root.innerHTML = renderClientAppView();
+  } else if (view === "restaurant") {
+    root.innerHTML = renderRestaurantView();
+  } else if (view === "admin") {
+    root.innerHTML = renderAdminView();
+  } else if (view === "split") {
+    root.innerHTML = renderSplitView();
   }
 }
+
+function selectAdminRestaurant(id) {
+  appState.selectedRestaurantId = id;
+  renderApp();
+}
+
+function setRestCategoryFilter(cat) {
+  appState.selectedRestCategoryFilter = cat;
+  renderApp();
+}
+
+async function triggerQueueAction(entryId, action) {
+  const res = await apiPost("/api/restaurant/action", { entry_id: entryId, action });
+  if (res && res.ok) {
+    refreshClientState();
+    renderApp();
+  }
+}
+
+async function toggleRestOpen(restaurantId) {
+  const res = await apiPost("/api/restaurant/toggle", { restaurant_id: restaurantId });
+  if (res && res.ok) {
+    showToast("Status da fila digital alterado.", "var(--blue)");
+  }
+}
+
+async function submitWalkin(e, restaurantId) {
+  if (e) e.preventDefault();
+  const nameInput = document.getElementById("walkinName");
+  const partyInput = document.getElementById("walkinParty");
+  if (!nameInput) return;
+
+  const res = await apiPost("/api/restaurant/walkin", {
+    restaurant_id: restaurantId,
+    customer_name: nameInput.value,
+    party_size: Number(partyInput?.value || 2),
+  });
+
+  if (res && res.ok) {
+    showToast(`Cliente presencial adicionado!`, "var(--emerald)");
+    nameInput.value = "";
+    refreshClientState();
+    renderApp();
+  }
+}
+
+// ==================== EXPORTAÇÕES GLOBAIS PARA O DOM ====================
+Object.assign(window, {
+  appState,
+  switchMainView,
+  switchClientTab,
+  setAuthTab,
+  submitLogin,
+  submitRegister,
+  handleWorkplaceInput,
+  selectAutocompletePlace,
+  closeAllPlaceDropdowns,
+  quickLoginAs,
+  clientLogout,
+  submitProfileUpdate,
+  submitProfileDelete,
+  toggleCuisineSelection,
+  toggleProfileCuisineSelection,
+  toggleVRSelection,
+  toggleProfileVRSelection,
+  openEditVRModal,
+  saveModalVRs,
+  onSearchInput,
+  onCuisineFilter,
+  onMaxWaitFilter,
+  onRadiusFilter,
+  onPartySizeFilter,
+  openRestaurantModal,
+  selectModalPartySize,
+  closeModal,
+  closeModalOnOverlay,
+  confirmReservation,
+  cancelTicket,
+  confirmCheckin,
+  selectAdminRestaurant,
+  setRestCategoryFilter,
+  triggerQueueAction,
+  toggleRestOpen,
+  submitWalkin,
+  // Restaurante
+  switchRestaurantTab,
+  setRestaurantAuthTab,
+  quickLoginRestaurantAs,
+  submitRestaurantLogin,
+  submitRestaurantRegister,
+  restaurantLogout,
+  submitRestaurantProfileUpdate,
+  submitRestaurantProfileDelete,
+  toggleCurrentRestOpen,
+  toggleRestaurantRegisterVR,
+  toggleRestaurantProfileVR,
+  getAvailableCuisines,
+  selectRestaurantRegisterCuisine,
+  selectRestaurantProfileCuisine,
+  openCallClientModal,
+  closeCallClientModal,
+  confirmCallClient,
+  openChangeTableModal,
+  closeChangeTableModal,
+  confirmChangeTable,
+  confirmSeatClient,
+  cancelClientReservation,
+  finishTableOrder,
+  setTableOperationalStatus,
+  submitWalkinClient,
+  handleRestaurantAddressInput,
+  selectRestaurantAutocompletePlace,
+  calcElapsedMinutes,
+  renderRestaurantAppView,
+  renderSplitView,
+  renderApp,
+});
+
+// ==================== INICIALIZAÇÃO ====================
 
 document.addEventListener("DOMContentLoaded", async () => {
   applyTheme(appState.theme);
 
-  const themeBtn = document.getElementById("btnThemeToggle");
-  if (themeBtn) {
-    themeBtn.addEventListener("click", () => {
-      applyTheme(appState.theme === "dark" ? "light" : "dark");
-    });
-  }
+  // Garante que o app sempre inicie na aba Buscar ao carregar
+  appState.clientActiveTab = "buscar";
 
-  const tabs = document.querySelectorAll(".nav-tab");
-  tabs.forEach((btn) => {
+  // Botões do Topbar
+  document.getElementById("btnThemeToggle")?.addEventListener("click", () => {
+    applyTheme(appState.theme === "dark" ? "light" : "dark");
+  });
+
+  document.getElementById("btnResetDemo")?.addEventListener("click", async () => {
+    if (confirm("Deseja restaurar os dados originais do piloto do CLTempo?")) {
+      await apiPost("/api/admin/demo/reset");
+    }
+  });
+
+  document.querySelectorAll(".nav-tab").forEach((btn) => {
     btn.addEventListener("click", () => {
-      tabs.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      appState.currentView = btn.dataset.view;
-      renderApp();
+      switchMainView(btn.dataset.view);
     });
   });
 
-  const resetBtn = document.getElementById("btnResetDemo");
-  if (resetBtn) {
-    resetBtn.addEventListener("click", async () => {
-      await apiPost("/api/demo/reset");
-    });
+  // Renderiza imediatamente para nunca deixar a tela branca
+  renderApp();
+
+  // Carregar dados iniciais e conectar SSE
+  initSSE();
+  try {
+    const stateRes = await apiFetch("/api/state");
+    if (stateRes) {
+      appState.data = stateRes;
+    }
+    await refreshClientState();
+  } catch (err) {
+    console.warn("Aviso na carga inicial de dados:", err);
   }
 
-  const res = await fetch("/api/state");
-  if (res.ok) {
-    appState.data = await res.json();
-    renderApp();
-  }
-  initSSE();
+  // Atualiza a tela com os dados carregados
+  renderApp();
 });

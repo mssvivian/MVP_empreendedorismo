@@ -1,4 +1,4 @@
-# Arquitetura do Sistema — MVP Gestão de Filas para Restaurantes (FilaZero CLT)
+# Arquitetura do Sistema — MVP Gestão de Filas para Restaurantes (CLTempo)
 
 **Disciplina:** Empreendedorismo (UFRJ — 2026.2)  
 **Grupo:** Arthur Monteiro, Carolina Falcão, Fernando Bruzzi e Vivian Souza  
