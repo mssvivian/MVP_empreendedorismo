@@ -141,7 +141,7 @@ function handleRealtimeEvent(event, meta) {
       `<strong>${meta.customer_name}</strong> entrou na fila de <strong>Mesa ${meta.table_category}</strong> em ${meta.restaurant_name}`,
       "var(--primary)"
     );
-  } else if (event === "queue_call") {
+  } else if (event === "queue_call" || event === "queue_called") {
     const isMe = currentClientId && (meta.client_id === currentClientId || meta.user_id === currentClientId);
     if (isMe) {
       showToast(
@@ -154,7 +154,7 @@ function handleRealtimeEvent(event, meta) {
         "var(--emerald)"
       );
     }
-  } else if (event === "queue_seat") {
+  } else if (event === "queue_seat" || event === "queue_seated") {
     showToast(`Check-in confirmado: <strong>${meta.customer_name}</strong>`, "var(--emerald)");
   } else if (event === "queue_cancel" || event === "queue_cancelled") {
     const isMe =
@@ -173,6 +173,7 @@ function handleRealtimeEvent(event, meta) {
       showToast(`Reserva cancelada: <strong>${meta.customer_name}</strong>`, "var(--amber)");
     }
   } else if (event === "demo_reset") {
+    alertedCallEntries.clear();
     showToast("Dados do piloto restaurados!", "var(--blue)");
   }
 }
@@ -189,7 +190,10 @@ async function refreshClientState() {
   // 2. Buscar ticket ativo
   const ticketRes = await apiFetch(`/api/client/ticket?client_id=${client.id}`);
   if (ticketRes) {
-    appState.clientActiveTicket = ticketRes.active_ticket || null;
+    const previous = appState.clientActiveTicket;
+    const current = ticketRes.active_ticket || null;
+    appState.clientActiveTicket = current;
+    detectCallTransition(previous, current);
   }
 
   // 3. Buscar histórico
@@ -305,7 +309,7 @@ function handleWorkplaceInput(prefix) {
             </div>
           `).join("")}
           <div class="autocomplete-footer">
-            <span>Sugestões Google Maps</span>
+            <span>Sugestões de endereço</span>
             <span>CLTempo</span>
           </div>
         `;
@@ -331,7 +335,7 @@ function selectAutocompletePlace(prefix, mainText, lat, lng) {
     badge.style.display = "block";
     badge.innerHTML = `
       <span style="color:var(--emerald-text); font-weight:600; font-size:0.73rem;">
-        ✓ Localizado no Google Maps: <strong>${mainText}</strong> (${lat.toFixed(4)}, ${lng.toFixed(4)})
+        ✓ Localizado: <strong>${mainText}</strong> (${lat.toFixed(4)}, ${lng.toFixed(4)})
       </span>
     `;
   }
@@ -375,7 +379,7 @@ function handleRestaurantAddressInput(prefix) {
             `;
           }).join("")}
           <div class="autocomplete-footer">
-            <span>Sugestões Google Maps</span>
+            <span>Sugestões de endereço</span>
             <span>CLTempo</span>
           </div>
         `;
@@ -401,7 +405,7 @@ function selectRestaurantAutocompletePlace(prefix, addressText, lat, lng) {
     badge.style.display = "block";
     badge.innerHTML = `
       <span style="color:var(--emerald-text); font-weight:600; font-size:0.73rem;">
-        ✓ Localizado no Google Maps: <strong>${addressText}</strong> (${lat.toFixed(4)}, ${lng.toFixed(4)})
+        ✓ Localizado: <strong>${addressText}</strong> (${lat.toFixed(4)}, ${lng.toFixed(4)})
       </span>
     `;
   }
@@ -414,6 +418,7 @@ async function submitRegister(e) {
   const password = document.getElementById("regPassword")?.value;
   const phone = document.getElementById("regPhone")?.value;
   const workplace = document.getElementById("regWorkplace")?.value;
+  const baseline = document.getElementById("regBaseline")?.value;
 
   // Coleta as 3 culinárias selecionadas
   const selectedCuisines = Array.from(document.querySelectorAll(".cuisine-chip.selected"))
@@ -439,6 +444,7 @@ async function submitRegister(e) {
     pref_food_2,
     pref_food_3,
     meal_vouchers: selectedVRs.length > 0 ? selectedVRs : ["Alelo", "Ticket"],
+    baseline_standing_wait_min: baseline || undefined,
     lat: coords ? coords.lat : undefined,
     lng: coords ? coords.lng : undefined,
   });
@@ -587,6 +593,7 @@ async function submitProfileUpdate(e) {
   const phone = document.getElementById("profPhone")?.value;
   const workplace = document.getElementById("profWorkplace")?.value;
   const password = document.getElementById("profPassword")?.value;
+  const baseline = document.getElementById("profBaseline")?.value;
 
   const selectedCuisines = Array.from(document.querySelectorAll(".profile-cuisine-chip.selected"))
     .map((c) => c.dataset.value);
@@ -606,6 +613,7 @@ async function submitProfileUpdate(e) {
     pref_food_3: selectedCuisines[2] || client.pref_food_3,
     meal_vouchers: selectedVRs.length > 0 ? selectedVRs : (client.meal_vouchers || "Alelo, Ticket"),
     password: password || undefined,
+    baseline_standing_wait_min: baseline || undefined,
     lat: coords ? coords.lat : undefined,
     lng: coords ? coords.lng : undefined,
   };
@@ -814,6 +822,8 @@ async function confirmReservation(restaurantId) {
 
   if (res && res.ok) {
     closeModal();
+    unlockAudio();
+    requestCallNotificationPermission();
     showToast(`Reserva confirmada! Código: <strong>#${res.checkin_code}</strong>`, "var(--emerald)");
     await refreshClientState();
     // VAI AUTOMATICAMENTE PARA A ABA FILA
@@ -845,6 +855,280 @@ async function confirmCheckin(entryId) {
     await refreshClientState();
     renderApp();
   }
+}
+
+// ==================== ALERTAS DE CHAMADA (SOM, VIBRAÇÃO E NOTIFICAÇÃO) ====================
+
+const CALLED_STATUSES = ["CHAMADO", "CALLED"];
+const SERVED_STATUSES = ["SENTADO", "SEATED", "ENCERRADO"];
+const alertedCallEntries = new Set();
+const ORIGINAL_TITLE = document.title;
+let audioCtx = null;
+let titleFlashTimer = null;
+
+function isCalledStatus(status) {
+  return CALLED_STATUSES.includes((status || "").toUpperCase());
+}
+
+function isServedStatus(status) {
+  return SERVED_STATUSES.includes((status || "").toUpperCase());
+}
+
+// Navegadores só liberam áudio depois de uma interação do usuário
+function unlockAudio() {
+  try {
+    if (!audioCtx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) audioCtx = new Ctx();
+    }
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  } catch (err) {
+    audioCtx = null;
+  }
+}
+document.addEventListener("pointerdown", unlockAudio);
+document.addEventListener("keydown", unlockAudio);
+
+function playCallChime() {
+  if (!audioCtx) return;
+  const start = audioCtx.currentTime;
+  for (let round = 0; round < 2; round++) {
+    [880, 1175, 1568].forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const t = start + round * 0.9 + i * 0.2;
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.35, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.4);
+    });
+  }
+}
+
+function notificationsSupported() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+async function requestCallNotificationPermission() {
+  if (!notificationsSupported() || Notification.permission !== "default") return;
+  try {
+    await Notification.requestPermission();
+  } catch (err) {
+    /* navegador sem suporte à API baseada em Promise */
+  }
+  renderApp();
+}
+
+function flashTitle(message) {
+  clearInterval(titleFlashTimer);
+  let on = false;
+  titleFlashTimer = setInterval(() => {
+    document.title = on ? ORIGINAL_TITLE : message;
+    on = !on;
+  }, 1000);
+  const stop = () => {
+    if (document.visibilityState === "visible") {
+      clearInterval(titleFlashTimer);
+      document.title = ORIGINAL_TITLE;
+      document.removeEventListener("visibilitychange", stop);
+    }
+  };
+  document.addEventListener("visibilitychange", stop);
+  if (document.visibilityState === "visible") setTimeout(stop, 6000);
+}
+
+function alertClientCalled(ticket) {
+  if (!ticket || alertedCallEntries.has(ticket.id)) return;
+  alertedCallEntries.add(ticket.id);
+
+  const tableTxt = ticket.table_number ? ` — Mesa ${ticket.table_number}` : "";
+  const body = `${ticket.restaurant_name} chamou você${tableTxt}. Pode ir para o restaurante!`;
+
+  playCallChime();
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 600]);
+  flashTitle("🔔 Sua mesa está pronta!");
+
+  if (notificationsSupported() && Notification.permission === "granted") {
+    try {
+      const n = new Notification("🔔 Sua mesa está pronta!", {
+        body,
+        tag: `cltempo-call-${ticket.id}`,
+        requireInteraction: true,
+      });
+      n.onclick = () => {
+        window.focus();
+        appState.mainView = "client";
+        appState.clientActiveTab = "fila";
+        renderApp();
+        n.close();
+      };
+    } catch (err) {
+      /* alguns navegadores móveis só permitem notificações via Service Worker */
+    }
+  }
+
+  showCalledModal(ticket, body);
+}
+
+function showCalledModal(ticket, body) {
+  const modalContainer = document.getElementById("modalContainer");
+  const overlay = document.getElementById("modalOverlay");
+  if (!modalContainer || !overlay) return;
+  appState.selectedModalRestaurant = null;
+  modalContainer.innerHTML = `
+    <div style="text-align:center; padding:0.5rem 0;">
+      <div style="font-size:3rem; line-height:1;">🔔</div>
+      <h3 style="font-size:1.35rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif; margin:0.6rem 0 0.35rem;">
+        Sua mesa está pronta!
+      </h3>
+      <p style="font-size:0.9rem; color:var(--text-muted); margin-bottom:1.1rem;">${body}</p>
+      ${ticket.table_number ? `<div class="badge badge-purple" style="font-size:1rem; font-weight:800; padding:0.45rem 0.9rem; margin-bottom:1.1rem;">🪑 Mesa ${ticket.table_number}</div>` : ""}
+      <button type="button" class="btn btn-emerald btn-block btn-lg" onclick="closeModal(); switchMainView('client'); switchClientTab('fila');">
+        Ver minha reserva
+      </button>
+    </div>
+  `;
+  overlay.style.display = "flex";
+}
+
+// Dispara o alerta quando o ticket do cliente logado muda de AGUARDANDO para CHAMADO
+function detectCallTransition(previous, current) {
+  if (!current || !isCalledStatus(current.status)) return;
+  if (previous && previous.id === current.id && !isCalledStatus(previous.status)) {
+    alertClientCalled(current);
+  } else {
+    // Já estava chamado ao carregar a página: não toca de novo
+    alertedCallEntries.add(current.id);
+  }
+}
+
+function renderCallAlertsHint() {
+  if (!notificationsSupported()) return "";
+  if (Notification.permission === "default") {
+    return `
+      <button type="button" class="btn btn-outline btn-block btn-sm" onclick="unlockAudio(); requestCallNotificationPermission()">
+        🔔 Ativar alerta no navegador quando minha mesa for chamada
+      </button>`;
+  }
+  if (Notification.permission === "denied") {
+    return `
+      <div style="font-size:0.72rem; color:var(--text-muted); text-align:center;">
+        Notificações bloqueadas no navegador — você ainda recebe som e aviso na tela com esta aba aberta.
+      </div>`;
+  }
+  return `
+    <div style="font-size:0.72rem; color:var(--text-muted); text-align:center;">
+      🔔 Alertas ativos: avisaremos com som e notificação quando sua mesa for chamada.
+    </div>`;
+}
+
+// ==================== FEEDBACK DE TEMPO EM PÉ (MÉTRICA M4) ====================
+
+function clientNeedsBaseline() {
+  const c = appState.clientAuth.client;
+  return !!c && (c.baseline_standing_wait_min === null || c.baseline_standing_wait_min === undefined);
+}
+
+function setFeedbackValue(inputId, value) {
+  const input = document.getElementById(inputId);
+  if (input) input.value = value;
+  document.querySelectorAll(`[data-target="${inputId}"]`).forEach((chip) => {
+    chip.classList.toggle("selected", String(chip.dataset.value) === String(value));
+  });
+}
+
+function renderMinuteChips(inputId, values) {
+  return `
+    <div class="cuisine-grid" style="margin-bottom:0.5rem;">
+      ${values.map((v) => `
+        <div class="cuisine-chip" data-target="${inputId}" data-value="${v}" onclick="setFeedbackValue('${inputId}', ${v})">
+          ${v === 0 ? "Nada" : `${v} min`}
+        </div>
+      `).join("")}
+    </div>`;
+}
+
+function openFeedbackModal(entryId) {
+  const entry =
+    (appState.clientActiveTicket && appState.clientActiveTicket.id === entryId && appState.clientActiveTicket) ||
+    (appState.clientHistory || []).find((h) => h.id === entryId);
+  const restaurantName = entry ? entry.restaurant_name : "o restaurante";
+  const askBaseline = clientNeedsBaseline();
+
+  const modalContainer = document.getElementById("modalContainer");
+  const overlay = document.getElementById("modalOverlay");
+  if (!modalContainer || !overlay) return;
+  appState.selectedModalRestaurant = null;
+
+  modalContainer.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+      <h3 style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+        ⏱️ Como foi sua espera?
+      </h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form onsubmit="submitFeedback(event, ${entryId})">
+      <div class="form-group">
+        <label class="form-label">
+          Quanto tempo você ficou <strong>em pé</strong> esperando a mesa em ${restaurantName}?
+        </label>
+        ${renderMinuteChips("fbPerceived", [0, 2, 5, 10, 15, 20])}
+        <input type="number" id="fbPerceived" class="form-input" min="0" max="120" placeholder="Minutos (ex.: 3)" required />
+      </div>
+      ${askBaseline ? `
+        <div class="form-group">
+          <label class="form-label">
+            E antes do CLTempo, quanto tempo você costumava esperar em pé na fila do almoço?
+          </label>
+          ${renderMinuteChips("fbBaseline", [10, 20, 30, 40, 50])}
+          <input type="number" id="fbBaseline" class="form-input" min="0" max="120" placeholder="Minutos (ex.: 35)" required />
+          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:0.3rem;">
+            Perguntamos só uma vez. Você pode mudar depois no Perfil.
+          </div>
+        </div>
+      ` : ""}
+      <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Agora não</button>
+        <button type="submit" class="btn btn-primary">Enviar resposta</button>
+      </div>
+    </form>
+  `;
+  overlay.style.display = "flex";
+}
+
+async function submitFeedback(e, entryId) {
+  e.preventDefault();
+  const client = appState.clientAuth.client;
+  const perceived = document.getElementById("fbPerceived")?.value;
+  const baseline = document.getElementById("fbBaseline")?.value;
+
+  const res = await apiPost("/api/client/feedback", {
+    entry_id: entryId,
+    client_id: client ? client.id : null,
+    perceived_standing_wait_min: perceived,
+    baseline_standing_wait_min: baseline || undefined,
+  });
+
+  if (res && res.ok) {
+    if (res.client) {
+      appState.clientAuth.client = res.client;
+      localStorage.setItem("cltempo_client", JSON.stringify(res.client));
+    }
+    closeModal();
+    showToast(res.message || "Obrigado pela resposta!", "var(--emerald)");
+    await refreshClientState();
+    renderApp();
+  }
+}
+
+function pendingFeedbackEntries() {
+  return (appState.clientHistory || []).filter(
+    (h) => isServedStatus(h.status) && (h.perceived_standing_wait_min === null || h.perceived_standing_wait_min === undefined)
+  );
 }
 
 // ==================== RENDERS DA INTERFACE CLIENTE ====================
@@ -920,6 +1204,10 @@ function renderAuthScreen() {
             />
             <div id="regPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
             <div id="regWorkplaceBadge" style="margin-top:0.35rem; display:none;"></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Hoje, sem o app, quantos minutos você costuma esperar em pé na fila do almoço?</label>
+            <input type="number" id="regBaseline" class="form-input" min="0" max="120" placeholder="Ex.: 35 (opcional)" />
           </div>
 
           <div class="form-group">
@@ -1182,10 +1470,20 @@ function renderClientFilaTab() {
               <div style="text-align:center; padding:0.6rem; background:rgba(16, 185, 129, 0.08); border-radius:10px; font-size:0.8rem; color:var(--emerald-text); font-weight:700;">
                 🍽️ Bom apetite! Atendimento presencial na Mesa ${ticket.table_number || ""}.
               </div>
+              ${(ticket.perceived_standing_wait_min === null || ticket.perceived_standing_wait_min === undefined) ? `
+                <button class="btn btn-primary btn-block btn-sm" onclick="openFeedbackModal(${ticket.id})">
+                  ⏱️ Quanto tempo você ficou em pé? (10 segundos)
+                </button>
+              ` : `
+                <div style="font-size:0.75rem; color:var(--text-muted); text-align:center;">
+                  ✅ Obrigado! Você informou ${ticket.perceived_standing_wait_min} min em pé.
+                </div>
+              `}
             ` : `
               <button class="btn btn-outline btn-block btn-sm" onclick="cancelTicket(${ticket.id})">
                 Sair da Fila
               </button>
+              ${renderCallAlertsHint()}
             `}
           </div>
         </div>
@@ -1205,6 +1503,19 @@ function renderClientFilaTab() {
 
     <!-- Parte Inferior: Histórico de Reservas -->
     <div>
+      ${(() => {
+        const pending = pendingFeedbackEntries();
+        if (pending.length === 0) return "";
+        const last = pending[0];
+        return `
+          <div class="card" style="margin-bottom:0.85rem; border-color:var(--primary); display:flex; justify-content:space-between; align-items:center; gap:0.6rem; flex-wrap:wrap;">
+            <div style="font-size:0.8rem;">
+              <strong>Como foi sua espera em ${last.restaurant_name}?</strong><br/>
+              <span style="color:var(--text-muted);">Responda em 10 segundos e ajude a validar o CLTempo.</span>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openFeedbackModal(${last.id})">Responder</button>
+          </div>`;
+      })()}
       <div style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:0.55rem;">
         Histórico de Reservas
       </div>
@@ -1222,6 +1533,7 @@ function renderClientFilaTab() {
                 <th>Mesa</th>
                 <th>Status</th>
                 <th>Horário</th>
+                <th>Em pé</th>
               </tr>
             </thead>
             <tbody>
@@ -1239,6 +1551,13 @@ function renderClientFilaTab() {
                     <td>${h.party_size}p (${h.table_category})</td>
                     <td>${badge}</td>
                     <td style="color:var(--text-muted);">${h.joined_at}</td>
+                    <td>${
+                      h.perceived_standing_wait_min !== null && h.perceived_standing_wait_min !== undefined
+                        ? `${h.perceived_standing_wait_min} min`
+                        : isServedStatus(h.status)
+                          ? `<button class="btn btn-outline btn-sm" onclick="openFeedbackModal(${h.id})">Avaliar</button>`
+                          : `<span style="color:var(--text-muted);">—</span>`
+                    }</td>
                   </tr>
                 `;
               }).join("")}
@@ -1310,7 +1629,7 @@ function renderClientPerfilTab() {
           />
           <div id="profPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
           <div id="profWorkplaceBadge" style="font-size:0.73rem; margin-top:0.35rem; color:var(--text-muted);">
-            📍 Google Maps: <strong>${client.lat ? Number(client.lat).toFixed(4) : "-22.9035"}, ${client.lng ? Number(client.lng).toFixed(4) : "-43.1780"}</strong> (localizado)
+            📍 Coordenadas: <strong>${client.lat ? Number(client.lat).toFixed(4) : "-22.9035"}, ${client.lng ? Number(client.lng).toFixed(4) : "-43.1780"}</strong> (localizado)
           </div>
         </div>
 
@@ -1330,6 +1649,11 @@ function renderClientPerfilTab() {
               `;
             }).join("")}
           </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Sem o app, quantos minutos você esperava em pé na fila do almoço?</label>
+          <input type="number" id="profBaseline" class="form-input" min="0" max="120" value="${client.baseline_standing_wait_min ?? ""}" placeholder="Ex.: 35" />
         </div>
 
         <div class="form-group">
@@ -2453,7 +2777,7 @@ function renderRestaurantPerfilTab() {
             />
             <div id="profRestPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
             <div id="profRestAddressBadge" style="font-size:0.73rem; margin-top:0.35rem; color:var(--text-muted);">
-              📍 Google Maps: <strong>${rest.lat ? Number(rest.lat).toFixed(4) : "-22.9030"}, ${rest.lng ? Number(rest.lng).toFixed(4) : "-43.1770"}</strong> (localizado)
+              📍 Coordenadas: <strong>${rest.lat ? Number(rest.lat).toFixed(4) : "-22.9030"}, ${rest.lng ? Number(rest.lng).toFixed(4) : "-43.1770"}</strong> (localizado)
             </div>
           </div>
 
@@ -2703,16 +3027,32 @@ function renderAdminView() {
 
         <div class="card">
           <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M4. Redução de Espera em Pé</div>
-          <div style="font-size:1.75rem; font-weight:800; color:var(--blue);">${m4.reduction_pct}%</div>
-          <div style="font-size:0.75rem; color:var(--text-muted);">
-            Reduziu de ${m4.avg_standing_without_app_min}m para ~${m4.avg_standing_with_app_min}m (${m4.minutes_saved_per_lunch} min salvos)
+          ${m4.reduction_pct === null || m4.reduction_pct === undefined ? `
+            <div style="font-size:1.75rem; font-weight:800; color:var(--text-muted);">—</div>
+            <div style="font-size:0.75rem; color:var(--text-muted);">
+              Nenhum cliente respondeu ainda quanto tempo ficou em pé.
+            </div>
+          ` : `
+            <div style="font-size:1.75rem; font-weight:800; color:var(--blue);">${m4.reduction_pct}%</div>
+            <div style="font-size:0.75rem; color:var(--text-muted);">
+              Meta: >${m4.target_reduction_pct}% • De ${m4.avg_standing_without_app_min}m para ~${m4.avg_standing_with_app_min}m (${m4.minutes_saved_per_lunch} min salvos)
+            </div>
+          `}
+          <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.35rem;">
+            ${m4.feedback_count} resposta(s) •
+            ${m4.baseline_source === "clientes"
+              ? `"sem o app" informado por ${m4.baseline_count} cliente(s)`
+              : `"sem o app" = benchmark de ${m4.avg_standing_without_app_min} min (nenhum cliente informou ainda)`}
           </div>
         </div>
       </div>
 
       <!-- Funil de Prospecção de Restaurantes -->
       <div class="card">
-        <h3 style="font-size:1.05rem; font-weight:800; margin-bottom:0.75rem;">Funil de Parcerias do Polo</h3>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:0.6rem; flex-wrap:wrap; margin-bottom:0.75rem;">
+          <h3 style="font-size:1.05rem; font-weight:800;">Funil de Parcerias do Polo (M1)</h3>
+          <button type="button" class="btn btn-primary btn-sm" onclick="openLeadModal()">+ Registrar restaurante abordado</button>
+        </div>
         <div style="overflow-x:auto;">
           <table class="history-table">
             <thead>
@@ -2721,6 +3061,8 @@ function renderAdminView() {
                 <th>Contato</th>
                 <th>Status</th>
                 <th>Observações</th>
+                <th>Atualizado</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -2728,8 +3070,18 @@ function renderAdminView() {
                 <tr>
                   <td><strong>${l.restaurant_name}</strong></td>
                   <td>${l.contact_person}</td>
-                  <td><span class="badge ${l.status === "ONBOARDED" ? "badge-emerald" : (l.status === "IN_NEGOTIATION" ? "badge-blue" : "badge-amber")}">${l.status}</span></td>
+                  <td>
+                    <select class="form-input" style="padding:0.3rem 0.45rem; font-size:0.75rem; min-width:9.5rem;" onchange="updateLeadStatus(${l.id}, this.value)">
+                      ${Object.entries(LEAD_STATUS_LABELS).map(([value, label]) => `
+                        <option value="${value}" ${l.status === value ? "selected" : ""}>${label}</option>
+                      `).join("")}
+                    </select>
+                  </td>
                   <td style="color:var(--text-muted); font-size:0.75rem;">${l.notes || "-"}</td>
+                  <td style="color:var(--text-muted); font-size:0.75rem; white-space:nowrap;">${l.updated_at || "-"}</td>
+                  <td>
+                    <button type="button" class="btn btn-outline btn-sm" title="Remover do funil" onclick="deleteLead(${l.id}, ${JSON.stringify(l.restaurant_name).replace(/"/g, "&quot;")})">🗑️</button>
+                  </td>
                 </tr>
               `).join("")}
             </tbody>
@@ -2738,6 +3090,86 @@ function renderAdminView() {
       </div>
     </div>
   `;
+}
+
+// ==================== FUNIL DE LEADS (MÉTRICA M1) ====================
+
+const LEAD_STATUS_LABELS = {
+  APPROACHED: "🟡 Abordado",
+  IN_NEGOTIATION: "🔵 Em negociação",
+  ONBOARDED: "🟢 Aderiu ao piloto",
+  DECLINED: "🔴 Recusou",
+};
+
+function openLeadModal() {
+  const modalContainer = document.getElementById("modalContainer");
+  const overlay = document.getElementById("modalOverlay");
+  if (!modalContainer || !overlay) return;
+  appState.selectedModalRestaurant = null;
+
+  modalContainer.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+      <h3 style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+        🤝 Restaurante abordado
+      </h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form onsubmit="submitLead(event)">
+      <div class="form-group">
+        <label class="form-label">Nome do restaurante</label>
+        <input type="text" id="leadName" class="form-input" required />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Pessoa de contato</label>
+        <input type="text" id="leadContact" class="form-input" placeholder="Ex.: Carlos (gerente)" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Região</label>
+        <input type="text" id="leadRegion" class="form-input" value="Polo Centro" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Status</label>
+        <select id="leadStatus" class="form-input">
+          ${Object.entries(LEAD_STATUS_LABELS).map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Observações</label>
+        <input type="text" id="leadNotes" class="form-input" placeholder="Como foi a abordagem?" />
+      </div>
+      <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Salvar</button>
+      </div>
+    </form>
+  `;
+  overlay.style.display = "flex";
+}
+
+async function submitLead(e) {
+  e.preventDefault();
+  const res = await apiPost("/api/admin/leads/update", {
+    restaurant_name: document.getElementById("leadName")?.value,
+    contact_person: document.getElementById("leadContact")?.value,
+    region: document.getElementById("leadRegion")?.value,
+    status: document.getElementById("leadStatus")?.value,
+    notes: document.getElementById("leadNotes")?.value,
+  });
+  if (res && res.ok) {
+    closeModal();
+    showToast(res.message, "var(--emerald)");
+  }
+}
+
+async function updateLeadStatus(leadId, status) {
+  const res = await apiPost("/api/admin/leads/update", { lead_id: leadId, status });
+  if (res && res.ok) showToast("Status do lead atualizado.", "var(--emerald)");
+}
+
+async function deleteLead(leadId, name) {
+  if (!confirm(`Remover "${name}" do funil?`)) return;
+  const res = await apiPost("/api/admin/leads/delete", { lead_id: leadId });
+  if (res && res.ok) showToast("Lead removido.", "var(--amber)");
 }
 
 // ==================== RENDER PRINCIPAL ====================

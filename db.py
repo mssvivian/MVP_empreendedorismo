@@ -186,6 +186,7 @@ def init_db(force_reset=False):
                 company TEXT DEFAULT 'Empresa Polo Centro',
                 vr_card TEXT DEFAULT 'Alelo / Flash',
                 meal_vouchers TEXT DEFAULT 'Alelo, Ticket',
+                baseline_standing_wait_min INTEGER, -- Minutos em pé que o cliente relata esperar SEM o app (M4)
                 lat REAL DEFAULT -22.9035,
                 lng REAL DEFAULT -43.1780,
                 created_at TEXT NOT NULL
@@ -277,6 +278,7 @@ def init_db(force_reset=False):
             ("pref_food_2", "TEXT"),
             ("pref_food_3", "TEXT"),
             ("meal_vouchers", "TEXT DEFAULT 'Alelo, Ticket'"),
+            ("baseline_standing_wait_min", "INTEGER"),
             ("lat", "REAL DEFAULT -22.9035"),
             ("lng", "REAL DEFAULT -43.1780"),
         ]
@@ -567,6 +569,13 @@ def seed_data(cur):
              role, company, vr_card, meal_vouchers, lat, lng, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             c,
+        )
+
+    # Tempo em pé relatado por cada cliente ANTES do app (linha de base da métrica M4)
+    for client_id, baseline in [(1, 35), (2, 40), (3, 30), (4, 38), (5, 32), (6, 45)]:
+        cur.execute(
+            "UPDATE clients SET baseline_standing_wait_min = ? WHERE id = ?",
+            (baseline, client_id),
         )
 
     # 2. Restaurantes Parceiros no Polo Centro com credenciais, giros e mesas

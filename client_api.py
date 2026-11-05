@@ -25,6 +25,101 @@ from db import (
 )
 
 
+def parse_standing_minutes(value):
+    """Converte o tempo em pé informado (minutos) para int entre 0 e 120, ou None se ausente/inválido."""
+    if value is None or value == "":
+        return None
+    try:
+        return max(0, min(120, int(float(value))))
+    except (ValueError, TypeError):
+        return None
+
+
+# ==================== GEOLOCALIZAÇÃO VIA OPENSTREETMAP (sem chave) ====================
+# Quando GOOGLE_MAPS_API_KEY não está definida, usamos o Photon (https://photon.komoot.io),
+# um buscador gratuito sobre dados do OpenStreetMap feito para "busca enquanto digita".
+# Defina CLTEMPO_DISABLE_OSM=1 para trabalhar 100% offline (ex.: testes automatizados).
+
+PHOTON_URL = "https://photon.komoot.io/api/"
+# Caixa geográfica do município do Rio de Janeiro (lon_min, lat_min, lon_max, lat_max)
+RIO_BBOX = "-43.80,-23.09,-43.09,-22.74"
+POLO_CENTER = (-22.9035, -43.1780)
+_osm_cache = {}
+
+
+def _osm_enabled() -> bool:
+    return os.environ.get("CLTEMPO_DISABLE_OSM", "").strip() not in ("1", "true", "yes")
+
+
+def _format_osm_feature(feature):
+    """Converte um resultado GeoJSON do Photon no formato de sugestão usado pelo frontend."""
+    props = feature.get("properties", {})
+    coords = (feature.get("geometry") or {}).get("coordinates") or []
+    if len(coords) < 2:
+        return None
+
+    street = props.get("street")
+    number = props.get("housenumber")
+    name = props.get("name")
+    street_line = f"{street}, {number}" if street and number else street
+    main_text = name or street_line or props.get("district") or props.get("city")
+    if not main_text:
+        return None
+
+    secondary_parts = []
+    if street_line and street_line != main_text:
+        secondary_parts.append(street_line)
+    for key in ("district", "city", "state"):
+        val = props.get(key)
+        if val and val not in secondary_parts and val != main_text:
+            secondary_parts.append(val)
+    secondary_text = " - ".join(secondary_parts)
+
+    return {
+        "description": f"{main_text} — {secondary_text}" if secondary_text else main_text,
+        "main_text": main_text,
+        "secondary_text": secondary_text,
+        "lat": round(float(coords[1]), 6),
+        "lng": round(float(coords[0]), 6),
+    }
+
+
+def osm_search(query: str, limit: int = 5) -> list:
+    """Busca endereços/locais no Rio de Janeiro via Photon (OpenStreetMap). Retorna [] em caso de falha."""
+    q = (query or "").strip()
+    if len(q) < 3 or not _osm_enabled():
+        return []
+
+    cache_key = (q.lower(), limit)
+    if cache_key in _osm_cache:
+        return _osm_cache[cache_key]
+
+    params = urllib.parse.urlencode({
+        "q": q,
+        "limit": limit,
+        "lat": POLO_CENTER[0],
+        "lon": POLO_CENTER[1],
+        "bbox": RIO_BBOX,
+    })
+    results = []
+    try:
+        req = urllib.request.Request(f"{PHOTON_URL}?{params}", headers={"User-Agent": "CLTempo-MVP/1.0"})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                for feature in data.get("features", []):
+                    item = _format_osm_feature(feature)
+                    if item:
+                        results.append(item)
+    except Exception:
+        return []
+
+    if len(_osm_cache) > 500:
+        _osm_cache.clear()
+    _osm_cache[cache_key] = results
+    return results
+
+
 def geocode_address(address: str) -> tuple:
     """
     Localiza coordenadas geográficas (lat, lng) a partir do nome ou endereço fornecido.
@@ -70,7 +165,12 @@ def geocode_address(address: str) -> tuple:
         if any(k in addr_lower for k in keywords):
             return coords
 
-    # Cálculo determinístico próximo ao centro para locais sem chave
+    # Busca real no OpenStreetMap (gratuita, sem chave)
+    osm_results = osm_search(addr, limit=1)
+    if osm_results:
+        return osm_results[0]["lat"], osm_results[0]["lng"]
+
+    # Último recurso (sem internet): posição aproximada e determinística perto do centro do polo
     h = int(hashlib.md5(addr.encode("utf-8")).hexdigest()[:6], 16)
     delta_lat = ((h % 100) - 50) * 0.0001
     delta_lng = (((h // 100) % 100) - 50) * 0.0001
@@ -299,17 +399,27 @@ def handle_client_places_autocomplete(query: str):
                 "lng": place["lng"],
             })
 
+    source = "catalogo_polo"
+    if len(matches) < 6:
+        seen = {(m["lat"], m["lng"]) for m in matches}
+        for item in osm_search(q, limit=6 - len(matches)):
+            if (item["lat"], item["lng"]) not in seen:
+                matches.append(item)
+                seen.add((item["lat"], item["lng"]))
+                source = "catalogo_polo+openstreetmap"
+
     if not matches:
         dynamic_lat, dynamic_lng = geocode_address(q)
         matches.append({
-            "description": f"{q} — Rio de Janeiro, RJ (Polo Corporativo)",
+            "description": f"{q} — Rio de Janeiro, RJ (localização aproximada)",
             "main_text": q,
-            "secondary_text": "Rio de Janeiro, RJ (Localização aproximada via Google Maps)",
+            "secondary_text": "Rio de Janeiro, RJ (localização aproximada — endereço não encontrado)",
             "lat": dynamic_lat,
             "lng": dynamic_lng,
         })
+        source = "aproximado"
 
-    return {"ok": True, "predictions": matches[:6], "source": "google_maps_suggestions"}, HTTPStatus.OK
+    return {"ok": True, "predictions": matches[:6], "source": source}, HTTPStatus.OK
 
 
 def handle_client_register(body):
@@ -326,6 +436,7 @@ def handle_client_register(body):
     pref_food_1 = (body.get("pref_food_1") or "Executivo").strip()
     pref_food_2 = (body.get("pref_food_2") or "Buffet a Quilo").strip()
     pref_food_3 = (body.get("pref_food_3") or "Massas").strip()
+    baseline_standing = parse_standing_minutes(body.get("baseline_standing_wait_min"))
 
     if not name or not email or not password:
         return {"error": "Nome, e-mail e senha são obrigatórios."}, HTTPStatus.BAD_REQUEST
@@ -367,10 +478,10 @@ def handle_client_register(body):
         cur.execute(
             """
             INSERT INTO clients (name, email, password_hash, phone, workplace, pref_food_1, pref_food_2, pref_food_3,
-                                role, company, vr_card, meal_vouchers, lat, lng, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CLT Polo', ?, ?, ?, ?, ?, ?)
+                                role, company, vr_card, meal_vouchers, baseline_standing_wait_min, lat, lng, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CLT Polo', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (name, email, pw_hash, phone, workplace, pref_food_1, pref_food_2, pref_food_3, workplace, meal_vouchers, meal_vouchers, lat, lng, now_str),
+            (name, email, pw_hash, phone, workplace, pref_food_1, pref_food_2, pref_food_3, workplace, meal_vouchers, meal_vouchers, baseline_standing, lat, lng, now_str),
         )
         client_id = cur.lastrowid
         conn.commit()
@@ -445,6 +556,7 @@ def handle_client_update_profile(client_id, body):
     pref_food_2 = (body.get("pref_food_2") or "").strip()
     pref_food_3 = (body.get("pref_food_3") or "").strip()
     new_password = body.get("password")
+    baseline_standing = parse_standing_minutes(body.get("baseline_standing_wait_min"))
 
     lat = body.get("lat")
     lng = body.get("lng")
@@ -512,6 +624,12 @@ def handle_client_update_profile(client_id, body):
                 WHERE id = ?
                 """,
                 (name, phone, workplace, workplace, pref_food_1, pref_food_2, pref_food_3, meal_vouchers_str, meal_vouchers_str, lat, lng, client_id),
+            )
+
+        if baseline_standing is not None:
+            cur.execute(
+                "UPDATE clients SET baseline_standing_wait_min = ? WHERE id = ?",
+                (baseline_standing, client_id),
             )
 
         conn.commit()
@@ -910,3 +1028,69 @@ def handle_client_history(client_id):
         conn.close()
 
     return {"ok": True, "history": rows}, HTTPStatus.OK
+
+
+SERVED_STATUSES = ("SENTADO", "SEATED", "ENCERRADO")
+
+
+def handle_client_feedback(body):
+    """
+    Registra quanto tempo o cliente ficou em pé esperando a mesa nesta visita (métrica M4).
+    Opcionalmente registra também quanto tempo ele esperava em pé ANTES do app (linha de base).
+    """
+    try:
+        entry_id = int(body.get("entry_id") or 0)
+    except (ValueError, TypeError):
+        entry_id = 0
+    perceived = parse_standing_minutes(body.get("perceived_standing_wait_min"))
+    baseline = parse_standing_minutes(body.get("baseline_standing_wait_min"))
+    client_id = body.get("client_id")
+
+    if not entry_id or perceived is None:
+        return {"error": "Informe a reserva e o tempo que você ficou em pé (em minutos)."}, HTTPStatus.BAD_REQUEST
+
+    with db_lock:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, status, client_id, user_id FROM queue_entries WHERE id = ?", (entry_id,))
+        entry = cur.fetchone()
+        if not entry:
+            conn.close()
+            return {"error": "Reserva não encontrada."}, HTTPStatus.NOT_FOUND
+
+        owner_id = entry["client_id"] or entry["user_id"]
+        if client_id and owner_id and int(client_id) != int(owner_id):
+            conn.close()
+            return {"error": "Esta reserva pertence a outro cliente."}, HTTPStatus.FORBIDDEN
+
+        if (entry["status"] or "").upper() not in SERVED_STATUSES:
+            conn.close()
+            return {"error": "Só é possível avaliar reservas em que você já foi atendido."}, HTTPStatus.BAD_REQUEST
+
+        cur.execute(
+            "UPDATE queue_entries SET perceived_standing_wait_min = ? WHERE id = ?",
+            (perceived, entry_id),
+        )
+        if baseline is not None and owner_id:
+            cur.execute(
+                "UPDATE clients SET baseline_standing_wait_min = ? WHERE id = ?",
+                (baseline, owner_id),
+            )
+        conn.commit()
+
+        client = None
+        if owner_id:
+            cur.execute("SELECT * FROM clients WHERE id = ?", (owner_id,))
+            row = cur.fetchone()
+            if row:
+                client = dict(row)
+                client.pop("password_hash", None)
+        conn.close()
+
+    return {
+        "ok": True,
+        "entry_id": entry_id,
+        "perceived_standing_wait_min": perceived,
+        "client": client,
+        "message": "Obrigado! Sua resposta ajuda a validar o CLTempo.",
+    }, HTTPStatus.OK
