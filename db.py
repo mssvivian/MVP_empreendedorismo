@@ -13,7 +13,9 @@ import threading
 from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "mvp_filas.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "mvp_filas.db"))
+if os.path.dirname(DB_PATH):
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 db_lock = threading.Lock()
