@@ -3,6 +3,18 @@
 
 const DEMO_MODE = true;
 
+function safeReadJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null || raw === "undefined" || raw === "null") {
+      return fallback;
+    }
+    return JSON.parse(raw);
+  } catch (error) {
+    return fallback;
+  }
+}
+
 const demoClient = {
   id: 1,
   name: "Ana Silva",
@@ -92,10 +104,10 @@ const demoState = {
 const appState = {
   mainView: "client", // client | restaurant | admin | split
   theme: localStorage.getItem("cltempo_theme") || "light",
-  
+
   // Autenticação do Cliente
   clientAuth: {
-    client: JSON.parse(localStorage.getItem("cltempo_client") || "null") || demoClient,
+    client: safeReadJson("cltempo_client", demoClient),
     authTab: "login", // login | register
   },
   
@@ -122,7 +134,7 @@ const appState = {
 
   // Interface do Restaurante (Gestão de Salão, Fila e Mesas)
   restaurantAuth: {
-    restaurant: JSON.parse(localStorage.getItem("cltempo_restaurant") || "null") || demoRestaurant,
+    restaurant: safeReadJson("cltempo_restaurant", demoRestaurant),
     authTab: "login", // login | register
     registerVRs: ["Alelo", "Sodexo", "Ticket Restaurante", "VR Refeição"],
     profileVRs: ["Alelo", "Sodexo", "Ticket Restaurante", "VR Refeição"],
@@ -1485,7 +1497,7 @@ function renderClientPerfilTab() {
 
   const currentPrefs = [client.pref_food_1, client.pref_food_2, client.pref_food_3].filter(Boolean);
   const currentVRList = normalizeMealVouchers(client.meal_vouchers || client.vr_card || "Alelo, Ticket").map((v) => v.toLowerCase());
-  const currentVRBadge = normalizeMealVouchers(client.meal_vouchers || client.vr_card || "Alelo, Ticket").join(", ");
+  const currentVRBadge = normalizeMealVouchers(client.meal_vouchers || client.vr_card || "Alelo, Ticket").join(", ") || "Alelo, Ticket";
 
   return `
     <div class="card" style="margin-bottom:1rem;">
