@@ -974,7 +974,7 @@ function openRestaurantModal(restId) {
         <button class="btn btn-primary btn-block btn-lg" onclick="confirmReservation(${rest.id})">
           ✓ Confirmar Reserva (Entrar na Fila)
         </button>
-        <a href="${rest.whatsapp_url}" target="_blank" class="btn btn-whatsapp btn-block">
+        <a href="#" onclick="event.preventDefault(); showToast('Contato via WhatsApp indisponível na demo estática.', 'var(--amber)');" class="btn btn-whatsapp btn-block">
           💬 Falar com o Restaurante (WhatsApp)
         </a>
       </div>
@@ -1023,7 +1023,7 @@ async function confirmReservation(restaurantId) {
     joined_at: "18:32",
     status: "AGUARDANDO",
     table_number: null,
-    whatsapp_url: "https://wa.me/552199887766?text=Ol%C3%A1%2C%20quero%20confirmar%20minha%20reserva%20no%20CLTempo.",
+    whatsapp_url: "#",
   };
 
   appState.clientActiveTicket = staticTicket;
@@ -1331,7 +1331,7 @@ function renderClientFilaTab() {
     joined_at: "18:32",
     status: "AGUARDANDO",
     table_number: null,
-    whatsapp_url: "https://wa.me/552199887766?text=Ol%C3%A1%2C%20quero%20confirmar%20minha%20reserva%20no%20CLTempo.",
+    whatsapp_url: "#",
   };
   const history = appState.clientHistory && appState.clientHistory.length > 0 ? appState.clientHistory : [
     { restaurant_name: "Table 9", party_size: 2, table_category: "1-2", status: "CONFIRMADO", joined_at: "Hoje, 18:00" },
@@ -1345,7 +1345,7 @@ function renderClientFilaTab() {
   const tableNumber = ticket.table_number || 4;
   const positionLabel = ticket.position ?? 3;
   const waitLabel = ticket.estimated_wait_min ?? 12;
-  const whatsappUrl = ticket.whatsapp_url || "https://wa.me/552199887766?text=Ol%C3%A1%2C%20quero%20confirmar%20minha%20reserva%20no%20CLTempo.";
+  const whatsappUrl = ticket.whatsapp_url || "#";
 
   return `
     <!-- Parte Superior: Reserva Atual -->
@@ -1391,7 +1391,7 @@ function renderClientFilaTab() {
         </div>
 
         <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.85rem;">
-          <a href="${whatsappUrl}" target="_blank" class="btn btn-whatsapp btn-block">
+          <a href="${whatsappUrl}" onclick="if (this.getAttribute('href') === '#') { event.preventDefault(); showToast('Contato via WhatsApp indisponível na demo estática.', 'var(--amber)'); }" class="btn btn-whatsapp btn-block">
             💬 Falar com o Restaurante (WhatsApp)
           </a>
 
