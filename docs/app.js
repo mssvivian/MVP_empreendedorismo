@@ -26,6 +26,8 @@ const demoClient = {
   pref_food_1: "Japonês & Poke",
   pref_food_2: "Saladas & Saudável",
   pref_food_3: "Massas & Italiana",
+  meal_vouchers: ["Alelo", "Ticket"],
+  vr_card: "Alelo, Ticket",
 };
 
 const demoRestaurant = {
@@ -792,6 +794,21 @@ async function saveModalVRs() {
     return;
   }
 
+  if (DEMO_MODE) {
+    const demoClientState = {
+      ...demoClient,
+      meal_vouchers: ["Alelo", "Ticket"],
+      vr_card: "Alelo, Ticket",
+    };
+
+    appState.clientAuth.client = demoClientState;
+    localStorage.setItem("cltempo_client", JSON.stringify(demoClientState));
+    closeModal();
+    showToast("Edição ignorada na demo — mantendo os cartões mockados.", "var(--amber)");
+    renderApp();
+    return;
+  }
+
   const res = await apiPost("/api/client/profile/vr", {
     client_id: client.id,
     meal_vouchers: selectedVRs,
@@ -810,6 +827,18 @@ async function submitProfileUpdate(e) {
   e.preventDefault();
   const client = appState.clientAuth.client;
   if (!client) return;
+
+  if (DEMO_MODE) {
+    appState.clientAuth.client = {
+      ...demoClient,
+      meal_vouchers: ["Alelo", "Ticket"],
+      vr_card: "Alelo, Ticket",
+    };
+    localStorage.setItem("cltempo_client", JSON.stringify(appState.clientAuth.client));
+    showToast("Alterações ignoradas na demo — mantendo o perfil mockado.", "var(--amber)");
+    renderApp();
+    return;
+  }
 
   const name = document.getElementById("profName")?.value;
   const phone = document.getElementById("profPhone")?.value;
