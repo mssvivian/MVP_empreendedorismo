@@ -6,6 +6,7 @@ services:
       - "8765:8765"
     environment:
       - PORT=8765
+      - DB_PATH=/app/data/mvp_filas.db
     volumes:
-      - ./mvp_filas.db:/app/mvp_filas.db
+      - ./data:/app/data
     restart: unless-stopped

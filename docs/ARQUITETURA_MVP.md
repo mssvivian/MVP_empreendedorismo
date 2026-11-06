@@ -7,12 +7,12 @@
 
 ## 1. Alinhamento Estratégico com o MVP Canvas
 
-A arquitetura foi desenhada seguindo estritamente o recorte de validação de hipóteses definido no [Canva.txt](file:///home/vivian/UFRJ/2026-2/MVP_Empreendedorismo/Canva.txt) e no [canvas_mvp.jpeg](file:///home/vivian/UFRJ/2026-2/MVP_Empreendedorismo/canvas_mvp.jpeg):
+A arquitetura foi desenhada seguindo estritamente o recorte de validação de hipóteses definido no [Canva.txt](Canva.txt) e no [canvas_mvp.jpeg](canvas_mvp.jpeg):
 
 | Bloco do Canvas | Decisão Arquitetural no MVP |
 | :--- | :--- |
 | **Personas Segmentadas** | **1. CLTs sem tempo:** Interface mobile-first focada em entrada na fila em menos de 15 segundos (às ~11h30, ainda no escritório).<br>**2. Restaurantes parceiros:** Painel web simplificado (tablet/balcão) de 1 toque para chamar mesas sem fricção operacional. |
-| **Jornada Melhorada** | Notificações em tempo real (Server-Sent Events / Push) permitem que o usuário saia do escritório apenas quando sua posição estiver próxima, convertendo 30–40 min de fila em pé em tempo livre de descanso pós-almoço (12h40–13h30). |
+| **Jornada Melhorada** | Notificações em tempo real (Server-Sent Events + alerta sonoro, vibração e notificação do navegador) permitem que o usuário saia do escritório apenas quando sua posição estiver próxima, convertendo 30–40 min de fila em pé em tempo livre de descanso pós-almoço (12h40–13h30). |
 | **Escopo Enxuto (Core MVP)** | Foco exclusivo em **Descoberta de Restaurantes do Polo**, **Entrada/Acompanhamento de Fila Digital** e **Painel do Restaurante**. Funcionalidades de *Mapa Virtual*, *Recomendação via IA* e *Fast-Pass Premium* foram isoladas para a Fase 2 (Pós-Validação). |
 | **Validação de Hipóteses** | Coleta nativa de telemetria no banco de dados para medir as **4 métricas do Canvas**: conversão de restaurantes, entradas/usuário/semana, taxa de desistência e redução do tempo percebido de espera em pé. |
 | **Custo & Cronograma** | Arquitetura monolítica modular com banco relacional leve e comunicação reativa via HTTP/SSE, permitindo entrega em **4 a 6 semanas** com custo de infraestrutura próximo de zero durante o piloto de **3 a 4 semanas**. |
@@ -32,10 +32,10 @@ flowchart TB
     end
 
     subgraph SistemaMVP["Sistema de Gestão de Filas (MVP)"]
-        SPA["📱 Frontend Multi-Visão (SPA)\nHTML5 + TailwindCSS + Vanilla JS\n(Visão CLT | Visão Restaurante | Split-Screen)"]
-        API["⚙️ Backend API & Motor de Filas\nPython HTTP/REST + Motor de Estimativa"]
+        SPA["📱 Frontend Multi-Visão (SPA)\nHTML5 + CSS próprio + Vanilla JS\n(Visão Cliente | Visão Restaurante | Administrador)"]
+        API["⚙️ Backend API & Motor de Filas\nPython (http.server) — app.py + client_api.py\nrestaurant_api.py + admin_api.py"]
         SSE["📡 Broker de Eventos em Tempo Real\nServer-Sent Events (SSE / EventSource)"]
-        DB[("🗄️ Banco de Dados Relacional\nSQLite (Protótipo) / PostgreSQL (Piloto Cloud)")]
+        DB[("🗄️ Banco de Dados Relacional\nSQLite (db.py)")]
     end
 
     CLT -->|"1. Consulta filas e entra remotamente (REST)"| SPA
@@ -56,53 +56,71 @@ O modelo de dados foi projetado para suportar tanto a operação de fila em temp
 
 ```mermaid
 erDiagram
-    USERS ||--o{ QUEUE_ENTRIES : "entra na fila"
+    CLIENTS ||--o{ QUEUE_ENTRIES : "entra na fila"
     RESTAURANTS ||--o{ QUEUE_ENTRIES : "gerencia"
+    RESTAURANTS ||--o{ RESTAURANT_TABLES : "possui"
     RESTAURANT_LEADS ||--o| RESTAURANTS : "converte em parceiro"
 
-    USERS {
+    CLIENTS {
         int id PK
         string name "Nome do colaborador CLT"
-        string email "E-mail corporativo"
-        string company "Empresa no polo corporativo"
+        string email "E-mail (login)"
+        string password_hash
+        string phone "WhatsApp"
+        string workplace "Local de trabalho no polo"
+        string pref_food_1_2_3 "3 culinárias preferidas"
+        string meal_vouchers "VRs que possui"
+        int baseline_standing_wait_min "Minutos em pé SEM o app (linha de base M4)"
+        float lat_lng "Coordenadas do local de trabalho"
         datetime created_at
     }
 
     RESTAURANTS {
         int id PK
         string name "Nome do restaurante"
-        string category "Culinária / Faixa de VR"
+        string email "Login do restaurante"
+        string cuisine_type "Culinária"
         string address "Localização no polo"
-        int avg_turnover_min "Tempo médio base de giro (min)"
-        int tables_1_2 "Qtd de mesas para 1 a 2 lugares"
-        int tables_3_4 "Qtd de mesas para 3 a 4 lugares"
-        int tables_5_plus "Qtd de mesas para 5+ lugares"
-        boolean is_open "Status da fila digital (Aberta/Fechada)"
-        int baseline_wait_min "Espera média em pé ANTES do app (min)"
+        int turnover_1_2_3_4_5_plus "Tempo de giro por porte de mesa (min)"
+        int tables_1_2_3_4_5_plus "Qtd de mesas por porte"
+        boolean is_open "Fila digital aberta/pausada"
+        string vr_accepted "VRs aceitos"
+        float lat_lng
+    }
+
+    RESTAURANT_TABLES {
+        int id PK
+        int restaurant_id FK
+        int table_number "Numeração consecutiva"
+        string table_type "'1-2' | '3-4' | '5+'"
+        string status "LIVRE | ALOCADA | INDISPONÍVEL"
     }
 
     QUEUE_ENTRIES {
         int id PK
         int restaurant_id FK
-        int user_id FK
+        int client_id FK "Nulo para walk-in"
         string customer_name "Nome para chamada"
-        int party_size "Qtd de pessoas (1 a 10)"
-        string table_category "Categoria da fila: '1-2' | '3-4' | '5+'"
-        string status "WAITING | CALLED | SEATED | CANCELLED | NO_SHOW"
-        string checkin_code "Código curto de validação (ex: FZ-482)"
-        string cancel_reason "Motivo se desistiu (ex: Reunião de última hora)"
-        int perceived_standing_wait_min "Minutos em pé relatados pelo usuário no check-in"
-        datetime joined_at "Timestamp de entrada (ex: 11:32)"
-        datetime called_at "Timestamp de chamada pela recepção"
-        datetime completed_at "Timestamp de check-in ou cancelamento"
+        int party_size "Qtd de pessoas"
+        string table_category "'1-2' | '3-4' | '5+'"
+        string status "AGUARDANDO | CHAMADO | SENTADO | ENCERRADO | CANCELADO"
+        int table_number "Mesa alocada na chamada"
+        string checkin_code "Código curto (ex: CLT-482)"
+        string cancel_reason "Motivo da desistência (M3)"
+        int perceived_standing_wait_min "Minutos em pé relatados após o atendimento (M4)"
+        datetime joined_at
+        datetime called_at
+        datetime checkin_at
+        datetime completed_at
     }
 
     RESTAURANT_LEADS {
         int id PK
-        string restaurant_name "Restaurante abordado no polo"
+        string restaurant_name "Restaurante abordado"
         string contact_person "Gerente / Proprietário"
+        string region
         string status "APPROACHED | IN_NEGOTIATION | ONBOARDED | DECLINED"
-        string notes "Observações da abordagem comercial"
+        string notes
         datetime updated_at
     }
 ```
@@ -135,52 +153,86 @@ sequenceDiagram
 
     Note over CLT,App: 11:30 — Pausa rápida antes do almoço
     CLT->>App: Abre lista de restaurantes do polo
-    App->>API: GET /api/restaurants
+    App->>API: GET /api/client/restaurants
     API->>DB: Conta filas ativas e calcula tempo estimado
     API-->>App: Lista com fila atual e espera estimada (ex: 18 min)
 
     CLT->>App: Clica em "Entrar na Fila" (2 pessoas)
-    App->>API: POST /api/queue/join {restaurant_id, user_id, party_size}
-    API->>DB: INSERT INTO queue_entries (status='WAITING', code='FZ-901')
+    App->>API: POST /api/client/queue/join {restaurant_id, client_id, party_size}
+    API->>DB: INSERT INTO queue_entries (status='AGUARDANDO', code='CLT-901')
     API-->>Painel: 📡 Evento SSE: queue_updated (Novo cliente na fila)
-    API-->>App: Retorna Ticket Digital #4 (Código FZ-901)
+    API-->>App: Retorna Ticket Digital (Código CLT-901)
 
     Note over CLT,Painel: 11:55 — CLT caminha até o restaurante enquanto a fila anda
-    Painel->>API: POST /api/queue/{id}/call (Restaurante chama a mesa)
-    API->>DB: UPDATE status='CALLED', called_at=NOW()
-    API-->>App: 📡 Evento SSE: queue_updated (Status = CALLED)
-    App-->>CLT: 🔔 Alerta Visual/Sonoro: "Sua mesa está pronta! Apresente FZ-901"
+    Painel->>API: POST /api/restaurant/call {entry_id, table_number}
+    API->>DB: UPDATE status='CHAMADO', table_number, called_at=NOW()
+    API-->>App: 📡 Evento SSE: queue_called
+    App-->>CLT: 🔔 Som + vibração + notificação do navegador: "Sua mesa está pronta! Mesa 4"
 
     Note over CLT,Painel: 12:00 — Chegada sem espera em pé
-    CLT->>Painel: Apresenta código FZ-901 na recepção
-    Painel->>API: POST /api/queue/{id}/seat
-    API->>DB: UPDATE status='SEATED', completed_at=NOW()
-    CLT->>App: Avalia "Tempo esperado em pé" (ex: 2 min vs 35 min antes)
-    App->>API: POST /api/queue/{id}/feedback {perceived_standing_wait_min: 2}
-    API->>DB: Salva métrica de percepção de valor (M4 do Canvas)
+    CLT->>Painel: Chega e se apresenta na recepção
+    Painel->>API: POST /api/restaurant/seat {entry_id}
+    API->>DB: UPDATE status='SENTADO', checkin_at=NOW()
+    CLT->>App: Responde "quanto tempo ficou em pé?" (ex: 2 min)
+    App->>API: POST /api/client/feedback {entry_id, perceived_standing_wait_min: 2}
+    API->>DB: Salva percepção (M4) — e, na 1ª vez, o tempo em pé sem o app
 ```
 
 ---
 
 ## 5. Rastreabilidade das Métricas do MVP Canvas
 
-Cada métrica listada no bloco **"Métricas para validar as hipóteses do negócio"** do Canvas possui uma consulta dedicada na camada de dados (`/api/metrics`):
+Cada métrica listada no bloco **"Métricas para validar as hipóteses do negócio"** do Canvas é calculada em `admin_api.calculate_canvas_metrics()` e enviada em `GET /api/state` (campo `metrics`), exibida na aba **Administrador**:
 
 1. **Taxa de conversão de restaurantes abordados (`M1`):**
    $$\text{Conversão} = \frac{\text{COUNT}(\text{RESTAURANT\_LEADS onde status = 'ONBOARDED'})}{\text{COUNT}(\text{RESTAURANT\_LEADS totais})} \times 100$$
 2. **Número de entradas registradas na fila digital por usuário/semana (`M2`):**
    $$\text{Recorrência Semanal} = \frac{\text{Total de entradas na semana}}{\text{Usuários CLT ativos na semana}}$$
 3. **Taxa de desistência ou cancelamento da fila antes de ser chamado (`M3`):**
-   $$\text{Taxa de Abandono} = \frac{\text{COUNT}(\text{status} \in \{\text{'CANCELLED'}, \text{'NO\_SHOW'}\})}{\text{COUNT}(\text{entradas finalizadas ou canceladas})} \times 100$$
+   $$\text{Taxa de Abandono} = \frac{\text{COUNT}(\text{status} = \text{'CANCELADO'})}{\text{COUNT}(\text{entradas})} \times 100$$
 4. **Redução no tempo percebido de espera em pé (`M4`):**
-   $$\text{Redução (\%)} = \left(1 - \frac{\text{AVG}(\text{perceived\_standing\_wait\_min})}{\text{AVG}(\text{baseline\_wait\_min})}\right) \times 100$$
+   $$\text{Redução (\%)} = \left(1 - \frac{\text{AVG}(\text{queue\_entries.perceived\_standing\_wait\_min})}{\text{AVG}(\text{clients.baseline\_standing\_wait\_min})}\right) \times 100$$
+
+   - O tempo **com o app** vem da pergunta feita ao cliente depois do check-in (aba Fila → "Quanto tempo você ficou em pé?").
+   - O tempo **sem o app** é informado pelo próprio cliente no cadastro, no perfil ou no primeiro feedback. Só enquanto nenhum cliente informou é que o painel usa o benchmark de 35 min do Canvas (e avisa isso).
+   - Sem nenhuma resposta, o painel mostra "—" em vez de um número estimado.
+
+O funil da **M1** é alimentado pela equipe na aba **Administrador** (registrar restaurante abordado, mudar status, remover).
 
 ---
 
 ## 6. Especificação dos Endpoints da API (MVP)
 
+Todas as rotas `POST` recebem e devolvem JSON. Toda alteração dispara um evento SSE em `/api/events` com o estado consolidado.
+
 | Método | Rota | Descrição |
 | :--- | :--- | :--- |
+| `GET` | `/api/state` | Estado consolidado (restaurantes, filas, clientes, culinárias e métricas M1–M4). |
+| `GET` | `/api/events` | Stream **Server-Sent Events (SSE)** para atualização instantânea das telas. |
+| `GET` | `/api/cuisines` | Lista de culinárias padronizadas. |
+| `GET` | `/api/places/autocomplete?query=` | Sugestões de endereço (Google, se houver chave; senão catálogo do polo + OpenStreetMap). |
+| **Cliente** | | |
+| `POST` | `/api/client/register` · `/api/client/login` | Cadastro e login. |
+| `GET` | `/api/client/profile?client_id=` | Perfil do cliente. |
+| `POST` | `/api/client/profile/update` · `/profile/vr` · `/profile/delete` | Edição do perfil, dos VRs e exclusão da conta. |
+| `GET` | `/api/client/restaurants?...` | Busca com filtros (nome, culinária, espera máxima, raio, porte) e score. |
+| `POST` | `/api/client/queue/join` | Entra na fila e gera o código de check-in. |
+| `GET` | `/api/client/ticket?client_id=` · `/api/client/history?client_id=` | Reserva ativa e histórico. |
+| `POST` | `/api/client/feedback` | Tempo em pé na visita (M4) e, opcionalmente, o tempo em pé sem o app. |
+| **Restaurante** | | |
+| `POST` | `/api/restaurant/register` · `/api/restaurant/login` | Cadastro (gera as mesas) e login. |
+| `GET` | `/api/restaurant/profile?restaurant_id=` · `/api/restaurant/tables?restaurant_id=` | Perfil e mesas. |
+| `POST` | `/api/restaurant/profile/update` · `/profile/delete` | Edição (inclusive quantidade de mesas) e exclusão. |
+| `POST` | `/api/restaurant/call` · `/change-table` · `/seat` · `/cancel` | Chamar cliente para uma mesa, trocar mesa, check-in e cancelamento. |
+| `POST` | `/api/restaurant/finish-table` · `/table/status` | Encerrar atendimento e marcar mesa como livre/indisponível. |
+| `POST` | `/api/restaurant/walkin` · `/api/restaurant/toggle` | Cliente presencial e abrir/pausar a fila. |
+| `POST` | `/api/restaurant/action` | Rota genérica (`call`, `seat`, `cancel`, `noshow`) usada pelo app do cliente. |
+| **Administrador** | | |
+| `POST` | `/api/admin/leads/update` | Adiciona restaurante abordado ou muda o status de um lead (M1). |
+| `POST` | `/api/admin/leads/delete` | Remove um lead. |
+| `POST` | `/api/admin/demo/reset` | Restaura os dados de demonstração. |
+
+--- | :--- | :--- |
 | `GET` | `/api/state` | Retorna estado consolidado (restaurantes, filas ativas, usuários CLT e métricas do Canvas). |
 | `GET` | `/api/events` | Stream **Server-Sent Events (SSE)** para atualização instantânea de todas as telas abertas. |
 | `POST` | `/api/queue/join` | Registra entrada de um usuário CLT na fila de um restaurante e gera código de check-in. |
@@ -194,7 +246,7 @@ Cada métrica listada no bloco **"Métricas para validar as hipóteses do negóc
 
 ## 7. Roadmap de Evolução Arquitetural (Pós-MVP)
 
-Conforme recomendado em [Canva.txt](file:///home/vivian/UFRJ/2026-2/MVP_Empreendedorismo/Canva.txt), os blocos mais complexos do BMC foram isolados para a Fase 2 após validação das 4 semanas de piloto:
+Conforme recomendado em [Canva.txt](Canva.txt), os blocos mais complexos do BMC foram isolados para a Fase 2 após validação das 4 semanas de piloto:
 
 ```mermaid
 flowchart LR
@@ -218,7 +270,7 @@ flowchart LR
 
 ## 8. Como Executar o Protótipo Funcional
 
-O protótipo foi construído em **Python 3 puro (zero dependências externas)** com **SQLite** e **Server-Sent Events (SSE)**:
+O protótipo usa **Python 3 puro (sem dependências externas)**, **SQLite** e **Server-Sent Events (SSE)**. As instruções completas (Docker, variáveis de ambiente e testes) estão no [README](../README.md).
 
 ```bash
 python3 app.py
@@ -226,5 +278,5 @@ python3 app.py
 
 Acesse no navegador: **`http://localhost:8765`**
 
-- Use o modo **"Apresentação Split-Screen (CLT + Restaurante)"** no topo da página para demonstrar ao vivo a entrada na fila pelo celular do CLT à esquerda e o acionamento da mesa pelo restaurante à direita.
-- Acesse a aba **"Métricas do Canvas (Validação)"** para visualizar os 4 indicadores sendo recalculados em tempo real conforme você interage com o protótipo.
+- Use as abas **App Cliente** e **Restaurante** (de preferência em duas janelas lado a lado) para demonstrar ao vivo a entrada na fila pelo CLT e a chamada da mesa pelo restaurante.
+- Acesse a aba **Administrador** para ver as 4 métricas do Canvas recalculadas em tempo real e gerenciar o funil de restaurantes abordados.

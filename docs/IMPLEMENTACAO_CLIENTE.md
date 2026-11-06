@@ -31,7 +31,7 @@ O projeto foi totalmente reformulado a partir da proposta original:
 
 ## 2. Arquitetura Modular do Backend
 
-O antigo monólito [app.py](app.py) foi desmembrado em **três submódulos especializados por interface**, mantendo o ponto de entrada principal (`main`) e a infraestrutura de rede e eventos em `app.py`:
+O antigo monólito [app.py](../app.py) foi desmembrado em **três submódulos especializados por interface**, mantendo o ponto de entrada principal (`main`) e a infraestrutura de rede e eventos em `app.py`:
 
 ```
 MVP_empreendedorismo/
@@ -41,13 +41,15 @@ MVP_empreendedorismo/
 ├── admin_api.py            # Interface ADMINISTRADOR (Dashboard M1–M4 Canvas, Funil de Leads e Reset)
 ├── db.py                   # Camada de Persistência SQLite, Migrações, Haversine e Seed de Dados
 ├── Dockerfile              # Imagem conteinerizada leve em Python 3.11-slim
-├── docker-compose.yml      # Orquestração com volume persistente para mvp_filas.db
+├── docker-compose.yml      # Orquestração com volume persistente em ./data
 ├── .dockerignore           # Exclusão de arquivos temporários e caches
 ├── static/
 │   ├── index.html          # Shell HTML semântico com modais e notificações toast
 │   ├── styles.css          # Design System moderno, responsivo, temas Claro/Escuro
 │   └── app.js              # SPA reativa com SSE, controle de abas, geocoding e autocomplete
-└── mvp_filas.db            # Banco de dados SQLite persistente
+├── tests/                  # Testes automatizados (unittest)
+├── docs/                   # Documentação (este arquivo, arquitetura e Canvas)
+└── mvp_filas.db            # Banco SQLite local — gerado ao subir o app, fora do git
 ```
 
 ### Detalhamento das Responsabilidades:
@@ -66,12 +68,12 @@ MVP_empreendedorismo/
 
 Para garantir que a aplicação funcione em qualquer sistema operacional (macOS, Linux, Windows) sem conflitos de dependências ou versões do interpretador, foi criada a conteinerização completa:
 
-- **[Dockerfile](Dockerfile):** Utiliza imagem base `python:3.11-slim`, define diretório de trabalho `/app`, expõe a porta `8765` e inicia o servidor via `python -u app.py`.
-- **[docker-compose.yml](docker-compose.yml):**
+- **[Dockerfile](../Dockerfile):** Utiliza imagem base `python:3.11-slim`, define diretório de trabalho `/app`, expõe a porta `8765` e inicia o servidor via `python -u app.py`.
+- **[docker-compose.yml](../docker-compose.yml):**
   - Mapeia a porta `8765:8765`.
-  - Mapeia o volume local `./mvp_filas.db:/app/mvp_filas.db` para que os dados cadastrados pelos usuários permaneçam salvos mesmo se o contêiner for reiniciado.
+  - Mapeia a pasta local `./data` para `/app/data` e define `DB_PATH=/app/data/mvp_filas.db`, para que os dados cadastrados permaneçam salvos mesmo se o contêiner for reiniciado.
   - Define política de reinicialização `unless-stopped`.
-- **[.dockerignore](.dockerignore):** Garante builds rápidos ignorando arquivos `__pycache__`, `.git`, `.DS_Store` e arquivos de log.
+- **[.dockerignore](../.dockerignore):** Garante builds rápidos ignorando arquivos `__pycache__`, `.git`, `.DS_Store` e arquivos de log.
 
 ---
 
@@ -103,7 +105,7 @@ CREATE TABLE IF NOT EXISTS clients (
 ```
 
 ### 4.3 Rotina de Migração e Backfill
-O método `init_db()` em [db.py](db.py) verifica dinamicamente via `PRAGMA table_info(clients)` as colunas existentes e executa automaticamente comandos `ALTER TABLE clients ADD COLUMN ...` para quaisquer colunas que não existam em instalações prévias, além de preencher a nova coluna `meal_vouchers` com base nas informações existentes de cartões.
+O método `init_db()` em [db.py](../db.py) verifica dinamicamente via `PRAGMA table_info(clients)` as colunas existentes e executa automaticamente comandos `ALTER TABLE clients ADD COLUMN ...` para quaisquer colunas que não existam em instalações prévias, além de preencher a nova coluna `meal_vouchers` com base nas informações existentes de cartões.
 
 ---
 
@@ -222,10 +224,10 @@ Durante a homologação técnica, foram aplicadas as seguintes melhorias especí
    - Garantido que `appState.clientActiveTab` seja sempre inicializado em `"buscar"`, tanto no login normal, no cadastro e nos atalhos rápidos quanto ao recarregar a página.
 
 2. **Criação da Coluna `meal_vouchers` na Tabela `clients`:**
-   - Adicionada ao schema do banco em [db.py](db.py), com migração automática via `init_db()` e suporte a multi-seleção de bandeiras.
+   - Adicionada ao schema do banco em [db.py](../db.py), com migração automática via `init_db()` e suporte a multi-seleção de bandeiras.
 
 3. **Autocomplete Google Places no Local de Trabalho:**
-   - Implementado endpoint `/api/client/places/autocomplete` com suporte híbrido: consulta à API oficial do Google Maps quando `GOOGLE_MAPS_API_KEY` estiver definida no ambiente, ou catálogo corporativo do Centro do Rio de Janeiro como fallback de alta precisão.
+   - Implementado endpoint `/api/client/places/autocomplete` com suporte híbrido: consulta à API oficial do Google Maps quando `GOOGLE_MAPS_API_KEY` estiver definida no ambiente, ou, sem chave, catálogo corporativo do Centro do Rio de Janeiro complementado por busca gratuita no OpenStreetMap (Photon). Só sem internet o sistema cai para uma posição aproximada perto do centro do polo.
 
 4. **Teto Rigoroso de 100 Pontos no Score:**
    - O cálculo do algoritmo foi rebalanceado e encapsulado com `min(100.0, total)`, formatado visualmente como `★ Score X/100`.

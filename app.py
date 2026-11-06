@@ -25,12 +25,14 @@ from urllib.parse import parse_qs, urlparse
 from admin_api import (
     calculate_canvas_metrics,
     handle_admin_demo_reset,
+    handle_admin_leads_delete,
     handle_admin_leads_update,
 )
 from client_api import (
     geocode_address,
     handle_client_active_ticket,
     handle_client_delete_profile,
+    handle_client_feedback,
     handle_client_get_profile,
     handle_client_history,
     handle_client_join_queue,
@@ -570,6 +572,13 @@ class CLTempoRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(data, status=status)
             return
 
+        if parsed.path == "/api/admin/leads/delete":
+            data, status = handle_admin_leads_delete(body)
+            if status == HTTPStatus.OK:
+                broadcast_state("leads_updated", {})
+            self._send_json(data, status=status)
+            return
+
         if parsed.path in ("/api/admin/demo/reset", "/api/demo/reset"):
             data, status = handle_admin_demo_reset()
             if status == HTTPStatus.OK:
@@ -577,21 +586,15 @@ class CLTempoRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(data, status=status)
             return
 
-        # Feedback de tempo em pé
-        if parsed.path == "/api/queue/feedback":
-            entry_id = int(body.get("entry_id", 0))
-            perceived_min = max(0, min(60, int(body.get("perceived_standing_wait_min", 2))))
-            with db_lock:
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute(
-                    "UPDATE queue_entries SET perceived_standing_wait_min = ? WHERE id = ?",
-                    (perceived_min, entry_id),
+        # Feedback de tempo em pé (métrica M4 do Canvas)
+        if parsed.path in ("/api/client/feedback", "/api/queue/feedback"):
+            data, status = handle_client_feedback(body)
+            if status == HTTPStatus.OK:
+                broadcast_state(
+                    "feedback_recorded",
+                    {"entry_id": data["entry_id"], "perceived_min": data["perceived_standing_wait_min"]},
                 )
-                conn.commit()
-                conn.close()
-            broadcast_state("feedback_recorded", {"entry_id": entry_id, "perceived_min": perceived_min})
-            self._send_json({"ok": True})
+            self._send_json(data, status=status)
             return
 
         self._send_json({"error": "Endpoint não encontrado"}, status=HTTPStatus.NOT_FOUND)

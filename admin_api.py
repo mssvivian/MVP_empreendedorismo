@@ -11,6 +11,11 @@ from datetime import datetime
 from http import HTTPStatus
 from db import db_lock, get_db_connection, init_db
 
+# Espera média em pé no Polo Centro sem o app, usada só enquanto nenhum cliente informou a sua
+BENCHMARK_STANDING_WAIT_MIN = 35.0
+
+LEAD_STATUSES = ("APPROACHED", "IN_NEGOTIATION", "ONBOARDED", "DECLINED")
+
 
 def calculate_canvas_metrics():
     """Calcula as 4 métricas de validação de hipóteses definidas no Canvas do MVP."""
@@ -68,6 +73,7 @@ def calculate_canvas_metrics():
         m3_dropout_pct = round((dropped_count / total_all) * 100, 1)
 
         # M4. Redução de Espera em Pé
+        # "Com o app": média do tempo em pé relatado pelos clientes após serem atendidos.
         cur.execute(
             """
             SELECT
@@ -78,13 +84,45 @@ def calculate_canvas_metrics():
             """
         )
         m4_row = cur.fetchone()
-        avg_perceived = round(m4_row["avg_perceived"] or 2.8, 1) if m4_row else 2.8
-        avg_baseline = 35.0  # Espera média em pé no Polo Centro sem o app (Benchmark do Canvas)
-        feedback_count = m4_row["feedback_count"] or 0 if m4_row else 0
-        m4_reduction_pct = (
-            round((1.0 - (avg_perceived / avg_baseline)) * 100, 1) if avg_baseline > 0 else 0.0
+        feedback_count = (m4_row["feedback_count"] or 0) if m4_row else 0
+        avg_perceived = round(m4_row["avg_perceived"], 1) if feedback_count else None
+
+        # "Sem o app": tempo em pé que cada cliente relatou esperar antes do CLTempo.
+        # Prioriza quem respondeu o feedback; se ninguém informou, usa o benchmark do Canvas.
+        cur.execute(
+            """
+            SELECT AVG(c.baseline_standing_wait_min) as avg_baseline, COUNT(*) as n
+            FROM clients c
+            WHERE c.baseline_standing_wait_min IS NOT NULL
+              AND c.id IN (
+                  SELECT COALESCE(client_id, user_id) FROM queue_entries
+                  WHERE perceived_standing_wait_min IS NOT NULL
+              )
+            """
         )
-        m4_minutes_saved = round(avg_baseline - avg_perceived, 1)
+        b_row = cur.fetchone()
+        if not b_row or not b_row["n"]:
+            cur.execute(
+                """
+                SELECT AVG(baseline_standing_wait_min) as avg_baseline, COUNT(*) as n
+                FROM clients WHERE baseline_standing_wait_min IS NOT NULL
+                """
+            )
+            b_row = cur.fetchone()
+        baseline_count = (b_row["n"] or 0) if b_row else 0
+        if baseline_count:
+            avg_baseline = round(b_row["avg_baseline"], 1)
+            baseline_source = "clientes"
+        else:
+            avg_baseline = BENCHMARK_STANDING_WAIT_MIN
+            baseline_source = "benchmark"
+
+        if avg_perceived is not None and avg_baseline > 0:
+            m4_reduction_pct = round((1.0 - (avg_perceived / avg_baseline)) * 100, 1)
+            m4_minutes_saved = round(avg_baseline - avg_perceived, 1)
+        else:
+            m4_reduction_pct = None
+            m4_minutes_saved = None
 
         conn.close()
 
@@ -118,41 +156,82 @@ def calculate_canvas_metrics():
             "avg_standing_without_app_min": avg_baseline,
             "minutes_saved_per_lunch": m4_minutes_saved,
             "feedback_count": feedback_count,
+            "baseline_source": baseline_source,
+            "baseline_count": baseline_count,
+            "target_reduction_pct": 70.0,
         },
     }
 
 
 def handle_admin_leads_update(body):
-    """Atualiza o status de um lead no funil de prospecção ou adiciona novo lead."""
+    """Atualiza o status de um lead no funil de prospecção (M1) ou adiciona um novo lead."""
     lead_id = body.get("lead_id")
-    status = body.get("status", "ONBOARDED")
+    status = (body.get("status") or "APPROACHED").strip().upper()
     restaurant_name = (body.get("restaurant_name") or "").strip()
-    contact_person = (body.get("contact_person") or "Gerente").strip()
-    notes = (body.get("notes") or "Contato realizado pelo time de validação").strip()
+    contact_person = (body.get("contact_person") or "").strip() or "Não informado"
+    region = (body.get("region") or "").strip() or "Polo Centro"
+    notes = (body.get("notes") or "").strip()
     today_str = datetime.now().strftime("%Y-%m-%d")
+
+    if status not in LEAD_STATUSES:
+        return {"error": f"Status inválido. Use um de: {', '.join(LEAD_STATUSES)}."}, HTTPStatus.BAD_REQUEST
+    if not lead_id and not restaurant_name:
+        return {"error": "Informe o nome do restaurante abordado."}, HTTPStatus.BAD_REQUEST
 
     with db_lock:
         conn = get_db_connection()
         cur = conn.cursor()
 
         if lead_id:
+            cur.execute("SELECT id FROM restaurant_leads WHERE id = ?", (int(lead_id),))
+            if not cur.fetchone():
+                conn.close()
+                return {"error": "Lead não encontrado."}, HTTPStatus.NOT_FOUND
             cur.execute(
-                "UPDATE restaurant_leads SET status = ?, updated_at = ? WHERE id = ?",
-                (status, today_str, int(lead_id)),
+                """
+                UPDATE restaurant_leads
+                SET status = ?, notes = COALESCE(NULLIF(?, ''), notes), updated_at = ?
+                WHERE id = ?
+                """,
+                (status, notes, today_str, int(lead_id)),
             )
-        elif restaurant_name:
+            message = "Lead atualizado com sucesso."
+        else:
             cur.execute(
                 """
                 INSERT INTO restaurant_leads (restaurant_name, contact_person, region, status, notes, updated_at)
-                VALUES (?, ?, 'Polo Centro', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (restaurant_name, contact_person, status, notes, today_str),
+                (restaurant_name, contact_person, region, status, notes, today_str),
             )
+            message = "Restaurante adicionado ao funil."
 
         conn.commit()
         conn.close()
 
-    return {"ok": True, "message": "Lead atualizado com sucesso."}, HTTPStatus.OK
+    return {"ok": True, "message": message}, HTTPStatus.OK
+
+
+def handle_admin_leads_delete(body):
+    """Remove um lead do funil (ex.: cadastrado por engano)."""
+    try:
+        lead_id = int(body.get("lead_id") or 0)
+    except (ValueError, TypeError):
+        lead_id = 0
+    if not lead_id:
+        return {"error": "Informe o lead a remover."}, HTTPStatus.BAD_REQUEST
+
+    with db_lock:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM restaurant_leads WHERE id = ?", (lead_id,))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+
+    if not deleted:
+        return {"error": "Lead não encontrado."}, HTTPStatus.NOT_FOUND
+    return {"ok": True, "message": "Lead removido."}, HTTPStatus.OK
 
 
 def handle_admin_demo_reset():

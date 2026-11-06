@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Banco SQLite local (gerado automaticamente por init_db)
+*.db
+*.db-journal
+data/
+
+# Sistema / editores
+.DS_Store
+.vscode/
+.idea/
+*.log

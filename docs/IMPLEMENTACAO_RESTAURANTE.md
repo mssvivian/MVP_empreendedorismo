@@ -128,7 +128,7 @@ A geração de mesas foi automatizada por meio da função `generate_restaurant_
 
 ## 4. Módulo Backend: `restaurant_api.py`
 
-O arquivo [restaurant_api.py](restaurant_api.py) encapsula integralmente as regras de negócio de atendimento e gestão física:
+O arquivo [restaurant_api.py](../restaurant_api.py) encapsula integralmente as regras de negócio de atendimento e gestão física:
 
 | Função | Comportamento Técnico |
 | :--- | :--- |
@@ -151,7 +151,7 @@ O arquivo [restaurant_api.py](restaurant_api.py) encapsula integralmente as regr
 
 ## 5. Endpoints REST no `app.py`
 
-O servidor HTTP em [app.py](app.py) foi atualizado para rotear os novos endpoints REST e transmiti-los via Server-Sent Events (SSE):
+O servidor HTTP em [app.py](../app.py) foi atualizado para rotear os novos endpoints REST e transmiti-los via Server-Sent Events (SSE):
 
 - `POST /api/restaurant/register`
 - `POST /api/restaurant/login`
@@ -315,7 +315,11 @@ Para atender às solicitações de simplificação e clareza da experiência do 
 
 ## 9. Verificação & Testes Automatizados
 
-O sistema foi rigorosamente validado através de sete baterias de testes automatizados:
+> **Nota:** as baterias abaixo foram executadas durante o desenvolvimento, mas os scripts não foram versionados.
+> Os testes automatizados que estão no repositório ficam em [`tests/`](../tests/) e rodam com
+> `python3 -m unittest discover -s tests -v` (veja o [README](../README.md)).
+
+O sistema foi validado durante o desenvolvimento através das seguintes baterias de testes:
 
 1. **Teste de Login Oficial e Resolução de Aliases dos Restaurantes Demo:**
    - Login com credenciais oficiais dos 5 restaurantes (*Bistrô do Ouvidor*, *Grão & Brasa*, *Pasta & Basta*, *Koji Sushi*, *Verde & Fresco*) via API retornando HTTP 200 OK e dados sem vazamento de senha.
