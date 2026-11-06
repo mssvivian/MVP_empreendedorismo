@@ -695,12 +695,27 @@ function toggleProfileVRSelection(el) {
   }
 }
 
+function normalizeMealVouchers(value) {
+  if (Array.isArray(value)) {
+    return value.filter((v) => typeof v === "string" && v.trim()).map((v) => v.trim());
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+
+  return ["Alelo", "Ticket"];
+}
+
 function openEditVRModal() {
   const client = appState.clientAuth.client;
   if (!client) return;
 
-  const currentVRStr = client.meal_vouchers || client.vr_card || "Alelo, Ticket";
-  const currentVRs = currentVRStr.split(",").map((v) => v.trim().toLowerCase());
+  const currentVRs = normalizeMealVouchers(client.meal_vouchers || client.vr_card || "Alelo, Ticket")
+    .map((v) => v.toLowerCase());
 
   const availableVRs = [
     "Alelo",
@@ -1469,8 +1484,8 @@ function renderClientPerfilTab() {
   ];
 
   const currentPrefs = [client.pref_food_1, client.pref_food_2, client.pref_food_3].filter(Boolean);
-  const currentVRStr = client.meal_vouchers || client.vr_card || "Alelo, Ticket";
-  const currentVRList = currentVRStr.split(",").map((v) => v.trim().toLowerCase());
+  const currentVRList = normalizeMealVouchers(client.meal_vouchers || client.vr_card || "Alelo, Ticket").map((v) => v.toLowerCase());
+  const currentVRBadge = normalizeMealVouchers(client.meal_vouchers || client.vr_card || "Alelo, Ticket").join(", ");
 
   return `
     <div class="card" style="margin-bottom:1rem;">
@@ -1484,7 +1499,7 @@ function renderClientPerfilTab() {
           onclick="openEditVRModal()" 
           title="Clique para alterar seus cartões VR"
         >
-          💳 ${client.meal_vouchers || client.vr_card}
+          💳 ${currentVRBadge}
         </div>
       </div>
 
@@ -2600,7 +2615,7 @@ function renderRestaurantPerfilTab() {
   const vrOptions = ["Alelo", "Sodexo", "Ticket Restaurante", "VR Refeição", "Flash", "iFood Benefícios", "Caju"];
   const currentVRStr = rest.vr_accepted || "";
   if (!appState.restaurantAuth.profileVRs || appState.restaurantAuth.profileVRs.length === 0) {
-    appState.restaurantAuth.profileVRs = currentVRStr.split(",").map((s) => s.trim()).filter(Boolean);
+    appState.restaurantAuth.profileVRs = normalizeMealVouchers(currentVRStr);
   }
   const selectedVRs = appState.restaurantAuth.profileVRs;
   const allCuisines = getAvailableCuisines();
