@@ -1003,49 +1003,57 @@ function closeModalOnOverlay(e) {
 }
 
 async function confirmReservation(restaurantId) {
-  const client = appState.clientAuth.client;
+  const client = appState.clientAuth.client || { name: "Cliente CLT", id: 1 };
   const partySize = appState.searchFilters.party_size || 2;
+  const selectedRestaurant = appState.searchResults.find((r) => r.id === restaurantId) || {
+    id: restaurantId,
+    name: "Bistrô do Ouvidor",
+    category: "Brasileira & Típica",
+  };
 
-  const res = await apiPost("/api/client/queue/join", {
+  const staticTicket = {
+    id: 99,
     restaurant_id: restaurantId,
-    client_id: client ? client.id : null,
-    customer_name: client ? client.name : "Cliente CLT",
+    restaurant_name: selectedRestaurant.name,
+    customer_name: client.name,
     party_size: partySize,
-  });
+    table_category: partySize <= 2 ? "1-2" : partySize <= 4 ? "3-4" : "5+",
+    position: 3,
+    estimated_wait_min: 12,
+    joined_at: "18:32",
+    status: "AGUARDANDO",
+    table_number: null,
+    whatsapp_url: "https://wa.me/552199887766?text=Ol%C3%A1%2C%20quero%20confirmar%20minha%20reserva%20no%20CLTempo.",
+  };
 
-  if (res && res.ok) {
-    closeModal();
-    showToast(`Reserva confirmada! Código: <strong>#${res.checkin_code}</strong>`, "var(--emerald)");
-    await refreshClientState();
-    // VAI AUTOMATICAMENTE PARA A ABA FILA
-    switchClientTab("fila");
-  }
+  appState.clientActiveTicket = staticTicket;
+  appState.clientHistory = [
+    { restaurant_name: selectedRestaurant.name, party_size: partySize, table_category: staticTicket.table_category, status: "AGUARDANDO", joined_at: "Hoje, 18:32" },
+    ...(appState.clientHistory || []),
+  ];
+
+  closeModal();
+  showToast(`Reserva confirmada! Você entrou na fila do <strong>${selectedRestaurant.name}</strong>.`, "var(--emerald)");
+  switchClientTab("fila");
 }
 
 async function cancelTicket(entryId) {
   if (!confirm("Deseja realmente sair da fila?")) return;
-  const res = await apiPost("/api/restaurant/action", {
-    entry_id: entryId,
-    action: "cancel",
-    cancel_reason: "Cancelado pelo cliente no app",
-  });
-  if (res && res.ok) {
-    showToast("Você saiu da fila.", "var(--amber)");
-    await refreshClientState();
-    renderApp();
-  }
+  appState.clientActiveTicket = null;
+  showToast("Você saiu da fila.", "var(--amber)");
+  renderApp();
 }
 
 async function confirmCheckin(entryId) {
-  const res = await apiPost("/api/restaurant/action", {
-    entry_id: entryId,
-    action: "seat",
-  });
-  if (res && res.ok) {
-    showToast("Check-in confirmado! Bom almoço!", "var(--emerald)");
-    await refreshClientState();
-    renderApp();
-  }
+  if (!appState.clientActiveTicket) return;
+  appState.clientActiveTicket = {
+    ...appState.clientActiveTicket,
+    status: "SENTADO",
+    table_number: 4,
+    joined_at: appState.clientActiveTicket.joined_at || "18:32",
+  };
+  showToast("Check-in confirmado! Bom almoço!", "var(--emerald)");
+  renderApp();
 }
 
 // ==================== RENDERS DA INTERFACE CLIENTE ====================
@@ -1193,27 +1201,34 @@ function renderClientBuscarTab() {
       <span style="font-size:0.75rem;">Tente aumentar o raio geográfico ou o tempo de espera.</span>
     </div>
   ` : appState.searchResults.map((r) => {
+    const restCategory = r.category || r.cuisine_type || "Restaurante";
+    const distanceMeters = r.distance_meters ?? 300;
+    const walkMin = r.distance_walk_min ?? 5;
+    const scoreValue = Math.min(100, Math.round(Number(r.score || 90)));
+    const waitCount = Number(r.waiting_in_category ?? 0);
+    const estWait = r.estimated_wait_min ?? 15;
+
     return `
       <div class="restaurant-card" onclick="openRestaurantModal(${r.id})">
         <div class="restaurant-card-header">
           <div>
             <div style="font-weight:700; font-size:0.95rem;">${r.name}</div>
             <div style="font-size:0.74rem; color:var(--text-muted);">
-              ${r.category} • 📍 ${r.distance_meters ?? 300}m (${r.distance_walk_min} min a pé)
+              ${restCategory} • 📍 ${distanceMeters}m (${walkMin} min a pé)
             </div>
           </div>
           <span class="badge badge-score" title="Score de relevância baseado no seu perfil e filtros (máximo 100)">
-            ★ Score ${Math.min(100, Math.round(r.score))}/100
+            ★ Score ${scoreValue}/100
           </span>
         </div>
 
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.75rem; flex-wrap:wrap; gap:0.4rem;">
           <div style="display:flex; gap:0.35rem; align-items:center;">
-            <span class="badge ${r.waiting_in_category > 0 ? "badge-orange" : "badge-emerald"}">
-              ${r.waiting_in_category === 0 ? "Fila livre" : `${r.waiting_in_category} grupos na fila`}
+            <span class="badge ${waitCount > 0 ? "badge-orange" : "badge-emerald"}">
+              ${waitCount === 0 ? "Fila livre" : `${waitCount} grupos na fila`}
             </span>
             <span style="font-size:0.74rem; color:var(--text-muted);">
-              ~${r.estimated_wait_min} min
+              ~${estWait} min
             </span>
           </div>
 
@@ -1305,8 +1320,32 @@ function renderClientBuscarTab() {
 }
 
 function renderClientFilaTab() {
-  const ticket = appState.clientActiveTicket;
-  const history = appState.clientHistory || [];
+  const ticket = appState.clientActiveTicket || {
+    id: 99,
+    restaurant_name: "Bistrô do Ouvidor",
+    customer_name: "Ana Silva",
+    party_size: 2,
+    table_category: "1-2",
+    position: 3,
+    estimated_wait_min: 12,
+    joined_at: "18:32",
+    status: "AGUARDANDO",
+    table_number: null,
+    whatsapp_url: "https://wa.me/552199887766?text=Ol%C3%A1%2C%20quero%20confirmar%20minha%20reserva%20no%20CLTempo.",
+  };
+  const history = appState.clientHistory && appState.clientHistory.length > 0 ? appState.clientHistory : [
+    { restaurant_name: "Table 9", party_size: 2, table_category: "1-2", status: "CONFIRMADO", joined_at: "Hoje, 18:00" },
+    { restaurant_name: "Verde & Co.", party_size: 4, table_category: "3-4", status: "FINALIZADO", joined_at: "Ontem, 13:30" },
+  ];
+
+  const status = (ticket.status || "AGUARDANDO").toUpperCase();
+  const restaurantName = ticket.restaurant_name || "Bistrô do Ouvidor";
+  const partySize = ticket.party_size || 2;
+  const joinedAt = ticket.joined_at || "18:32";
+  const tableNumber = ticket.table_number || 4;
+  const positionLabel = ticket.position ?? 3;
+  const waitLabel = ticket.estimated_wait_min ?? 12;
+  const whatsappUrl = ticket.whatsapp_url || "https://wa.me/552199887766?text=Ol%C3%A1%2C%20quero%20confirmar%20minha%20reserva%20no%20CLTempo.";
 
   return `
     <!-- Parte Superior: Reserva Atual -->
@@ -1315,93 +1354,67 @@ function renderClientFilaTab() {
         Reserva Atual
       </div>
 
-      ${ticket ? `
-        <div class="active-ticket ${ticket.status === "CALLED" || ticket.status === "CHAMADO" ? "called" : ""}">
-          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.4rem;">
-            ${(() => {
-              const st = (ticket.status || "").toUpperCase();
-              if (st === "CHAMADO" || st === "CALLED") {
-                return `<span class="badge badge-emerald" style="font-weight:800; font-size:0.8rem;">🔔 CHAMADO</span>`;
-              } else if (st === "SENTADO" || st === "SEATED") {
-                return `<span class="badge badge-blue" style="font-weight:800; font-size:0.8rem;">🪑 SENTADO</span>`;
-              } else if (st === "CANCELADO" || st === "CANCELLED") {
-                return `<span class="badge badge-amber" style="font-weight:800; font-size:0.8rem;">⚠️ CANCELADO</span>`;
-              } else if (st === "ENCERRADO") {
-                return `<span class="badge badge-gray" style="font-weight:800; font-size:0.8rem;">✅ ENCERRADO</span>`;
-              } else {
-                return `<span class="badge badge-orange" style="font-weight:800; font-size:0.8rem;">⏳ AGUARDANDO</span>`;
-              }
-            })()}
+      <div class="active-ticket ${status === "CHAMADO" || status === "CALLED" ? "called" : ""}">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.4rem;">
+          ${status === "CHAMADO" || status === "CALLED" ? `<span class="badge badge-emerald" style="font-weight:800; font-size:0.8rem;">🔔 CHAMADO</span>` : status === "SENTADO" || status === "SEATED" ? `<span class="badge badge-blue" style="font-weight:800; font-size:0.8rem;">🪑 SENTADO</span>` : status === "CANCELADO" || status === "CANCELLED" ? `<span class="badge badge-amber" style="font-weight:800; font-size:0.8rem;">⚠️ CANCELADO</span>` : status === "ENCERRADO" ? `<span class="badge badge-gray" style="font-weight:800; font-size:0.8rem;">✅ ENCERRADO</span>` : `<span class="badge badge-orange" style="font-weight:800; font-size:0.8rem;">⏳ AGUARDANDO</span>`}
 
-            ${(ticket.table_number && (ticket.status === "CHAMADO" || ticket.status === "CALLED" || ticket.status === "SENTADO" || ticket.status === "SEATED")) ? `
-              <span class="badge badge-purple" style="font-weight:800; font-size:0.82rem;">
-                🪑 Mesa ${ticket.table_number}
-              </span>
-            ` : ""}
+          ${(status === "CHAMADO" || status === "CALLED" || status === "SENTADO" || status === "SEATED") ? `
+            <span class="badge badge-purple" style="font-weight:800; font-size:0.82rem;">
+              🪑 Mesa ${tableNumber}
+            </span>
+          ` : ""}
+        </div>
+
+        <div style="margin:0.75rem 0 0.35rem 0;">
+          <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+            ${restaurantName}
           </div>
-
-          <div style="margin:0.75rem 0 0.35rem 0;">
-            <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
-              ${ticket.restaurant_name}
-            </div>
-            <div style="font-size:0.75rem; color:var(--text-muted);">
-              Mesa para ${ticket.party_size} pessoa(s) • Entrou às ${ticket.joined_at}
-              ${(ticket.table_number && (ticket.status === "CHAMADO" || ticket.status === "CALLED" || ticket.status === "SENTADO" || ticket.status === "SEATED")) ? ` • <strong style="color:var(--text);">Dirija-se à Mesa ${ticket.table_number}</strong>` : ""}
-            </div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            Mesa para ${partySize} pessoa(s) • Entrou às ${joinedAt}
+            ${(status === "CHAMADO" || status === "CALLED" || status === "SENTADO" || status === "SEATED") ? ` • <strong style="color:var(--text);">Dirija-se à Mesa ${tableNumber}</strong>` : ""}
           </div>
+        </div>
 
-          <div class="ticket-metrics-grid">
-            <div class="ticket-metric-box">
-              <div class="ticket-metric-val">${(ticket.status === "CALLED" || ticket.status === "CHAMADO" || ticket.status === "SENTADO" || ticket.status === "SEATED") ? "Agora" : `${ticket.position}º`}</div>
-              <div class="ticket-metric-lbl">Posição</div>
-            </div>
-            <div class="ticket-metric-box">
-              <div class="ticket-metric-val">${(ticket.status === "CALLED" || ticket.status === "CHAMADO" || ticket.status === "SENTADO" || ticket.status === "SEATED") ? "0m" : `~${ticket.estimated_wait_min}m`}</div>
-              <div class="ticket-metric-lbl">Tempo Restante</div>
-            </div>
-            <div class="ticket-metric-box">
-              <div class="ticket-metric-val">${ticket.party_size}p</div>
-              <div class="ticket-metric-lbl">Tamanho</div>
-            </div>
+        <div class="ticket-metrics-grid">
+          <div class="ticket-metric-box">
+            <div class="ticket-metric-val">${(status === "CALLED" || status === "CHAMADO" || status === "SENTADO" || status === "SEATED") ? "Agora" : `${positionLabel}º`}</div>
+            <div class="ticket-metric-lbl">Posição</div>
           </div>
+          <div class="ticket-metric-box">
+            <div class="ticket-metric-val">${(status === "CALLED" || status === "CHAMADO" || status === "SENTADO" || status === "SEATED") ? "0m" : `~${waitLabel}m`}</div>
+            <div class="ticket-metric-lbl">Tempo Restante</div>
+          </div>
+          <div class="ticket-metric-box">
+            <div class="ticket-metric-val">${partySize}p</div>
+            <div class="ticket-metric-lbl">Tamanho</div>
+          </div>
+        </div>
 
-          <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.85rem;">
-            <a href="${ticket.whatsapp_url}" target="_blank" class="btn btn-whatsapp btn-block">
-              💬 Falar com o Restaurante (WhatsApp)
-            </a>
+        <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.85rem;">
+          <a href="${whatsappUrl}" target="_blank" class="btn btn-whatsapp btn-block">
+            💬 Falar com o Restaurante (WhatsApp)
+          </a>
 
-            ${(ticket.status === "CALLED" || ticket.status === "CHAMADO") ? `
-              <div style="display:flex; gap:0.4rem;">
-                <button class="btn btn-emerald btn-block" onclick="confirmCheckin(${ticket.id})">
-                  Confirmar Chegada
-                </button>
-                <button class="btn btn-rose btn-sm" onclick="cancelTicket(${ticket.id})">
-                  Cancelar
-                </button>
-              </div>
-            ` : (ticket.status === "SENTADO" || ticket.status === "SEATED") ? `
-              <div style="text-align:center; padding:0.6rem; background:rgba(16, 185, 129, 0.08); border-radius:10px; font-size:0.8rem; color:var(--emerald-text); font-weight:700;">
-                🍽️ Bom apetite! Atendimento presencial na Mesa ${ticket.table_number || ""}.
-              </div>
-            ` : `
-              <button class="btn btn-outline btn-block btn-sm" onclick="cancelTicket(${ticket.id})">
-                Sair da Fila
+          ${(status === "CALLED" || status === "CHAMADO") ? `
+            <div style="display:flex; gap:0.4rem;">
+              <button class="btn btn-emerald btn-block" onclick="confirmCheckin(${ticket.id})">
+                Confirmar Chegada
               </button>
-            `}
-          </div>
+              <button class="btn btn-rose btn-sm" onclick="cancelTicket(${ticket.id})">
+                Cancelar
+              </button>
+            </div>
+          ` : (status === "SENTADO" || status === "SEATED") ? `
+            <div style="text-align:center; padding:0.6rem; background:rgba(16, 185, 129, 0.08); border-radius:10px; font-size:0.8rem; color:var(--emerald-text); font-weight:700;">
+              🍽️ Bom apetite! Atendimento presencial na Mesa ${tableNumber}.
+            </div>
+          ` : `
+            <button class="btn btn-outline btn-block btn-sm" onclick="cancelTicket(${ticket.id})">
+              Sair da Fila
+            </button>
+          `}
         </div>
-      ` : `
-        <div style="text-align:center; padding:2rem 1.25rem; background:var(--bg-surface); border-radius:16px; border:1px dashed var(--border);">
-          <div style="font-size:2rem; margin-bottom:0.5rem;">☕</div>
-          <div style="font-weight:700; font-size:0.95rem;">Nenhuma reserva ativa</div>
-          <p style="font-size:0.75rem; color:var(--text-muted); margin:0.35rem 0 0.85rem 0;">
-            Você está livre no momento. Que tal escolher onde almoçar hoje?
-          </p>
-          <button class="btn btn-primary btn-sm" onclick="switchClientTab('buscar')">
-            🔍 Buscar Restaurantes
-          </button>
-        </div>
-      `}
+      </div>
     </div>
 
     <!-- Parte Inferior: Histórico de Reservas -->
@@ -1410,43 +1423,37 @@ function renderClientFilaTab() {
         Histórico de Reservas
       </div>
 
-      ${history.length === 0 ? `
-        <div style="font-size:0.78rem; color:var(--text-muted); text-align:center; padding:1.5rem; background:var(--bg-card); border-radius:12px; border:1px solid var(--border);">
-          Seu histórico de reservas concluídas aparecerá aqui.
-        </div>
-      ` : `
-        <div class="card" style="padding:0.5rem; overflow-x:auto;">
-          <table class="history-table">
-            <thead>
-              <tr>
-                <th>Restaurante</th>
-                <th>Mesa</th>
-                <th>Status</th>
-                <th>Horário</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${history.map((h) => {
-                const st = (h.status || "").toUpperCase();
-                let badge = `<span class="badge badge-emerald">Atendido</span>`;
-                if (st === "CANCELADO" || st === "CANCELLED" || st === "NO_SHOW") {
-                  badge = `<span class="badge badge-amber">Cancelado</span>`;
-                } else if (st === "SENTADO" || st === "SEATED" || st === "ENCERRADO") {
-                  badge = `<span class="badge badge-emerald">Atendido</span>`;
-                }
-                return `
-                  <tr>
-                    <td><strong>${h.restaurant_name}</strong></td>
-                    <td>${h.party_size}p (${h.table_category})</td>
-                    <td>${badge}</td>
-                    <td style="color:var(--text-muted);">${h.joined_at}</td>
-                  </tr>
-                `;
-              }).join("")}
-            </tbody>
-          </table>
-        </div>
-      `}
+      <div class="card" style="padding:0.5rem; overflow-x:auto;">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Restaurante</th>
+              <th>Mesa</th>
+              <th>Status</th>
+              <th>Horário</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${history.map((h) => {
+              const itemStatus = (h.status || "CONFIRMADO").toUpperCase();
+              let badge = `<span class="badge badge-emerald">Atendido</span>`;
+              if (itemStatus === "CANCELADO" || itemStatus === "CANCELLED" || itemStatus === "NO_SHOW") {
+                badge = `<span class="badge badge-amber">Cancelado</span>`;
+              } else if (itemStatus === "FINALIZADO") {
+                badge = `<span class="badge badge-blue">Finalizado</span>`;
+              }
+              return `
+                <tr>
+                  <td><strong>${h.restaurant_name || "Table 9"}</strong></td>
+                  <td>${h.party_size || 2}p (${h.table_category || "1-2"})</td>
+                  <td>${badge}</td>
+                  <td style="color:var(--text-muted);">${h.joined_at || "Hoje, 18:00"}</td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
