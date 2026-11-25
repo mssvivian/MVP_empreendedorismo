@@ -1048,3 +1048,248 @@ body {
   color: var(--text-muted);
   border: 1px solid var(--border);
 }
+
+/* ==================== Telas mais enxutas (menos informação por página) ==================== */
+
+.section-label {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 0.55rem;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 1.5rem 1rem;
+  background: var(--bg-surface);
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.form-hint {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  padding: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn-link:hover { color: var(--text); }
+.btn-link-danger { color: var(--rose-text); }
+
+/* Cadastro em etapas */
+.form-step { display: none; }
+.form-step.active { display: block; }
+
+.step-dots {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+.step-dot {
+  flex: 1;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding-top: 0.4rem;
+  border-top: 3px solid var(--border);
+}
+.step-dot.active {
+  color: var(--primary-text);
+  border-top-color: var(--primary);
+}
+
+.demo-shortcuts {
+  margin-top: 1.25rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed var(--border);
+  text-align: center;
+}
+.demo-shortcuts-title {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-bottom: 0.45rem;
+}
+.demo-shortcuts-row {
+  display: flex;
+  gap: 0.35rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* Seções recolhíveis (perfil) */
+.collapsible {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  margin-bottom: 0.6rem;
+  overflow: hidden;
+}
+.collapsible-head {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 0.95rem;
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+.collapsible-title {
+  display: block;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+.collapsible-sub {
+  display: block;
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  margin-top: 0.1rem;
+}
+.collapsible-chevron {
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.collapsible.open .collapsible-chevron { transform: rotate(180deg); }
+.collapsible-body {
+  display: none;
+  padding: 0 0.95rem 0.95rem 0.95rem;
+}
+.collapsible.open .collapsible-body { display: block; }
+
+.account-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Ticket do cliente */
+.ticket-highlight {
+  text-align: center;
+  padding: 0.85rem;
+  border-radius: 12px;
+  background: var(--emerald-soft);
+}
+.ticket-highlight-val {
+  font-size: 1.6rem;
+  font-weight: 800;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  color: var(--emerald-text);
+}
+.ticket-highlight-lbl {
+  font-size: 0.78rem;
+  color: var(--emerald-text);
+  font-weight: 600;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+/* Fila do restaurante */
+.queue-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--primary);
+  border-radius: 12px;
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 0.5rem;
+}
+.queue-card-called { border-left-color: var(--emerald); }
+.queue-card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+.queue-card-name {
+  font-weight: 800;
+  font-size: 0.92rem;
+}
+.queue-card-sub {
+  font-size: 0.73rem;
+  color: var(--text-muted);
+}
+
+.table-size {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-family: inherit;
+}
+
+.tables-config {
+  width: 100%;
+  border-collapse: collapse;
+}
+.tables-config th {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-align: left;
+  padding: 0 0.25rem 0.3rem 0.25rem;
+}
+.tables-config td {
+  padding: 0.2rem 0.25rem;
+  font-size: 0.8rem;
+}
+.tables-config td:first-child { white-space: nowrap; }
+.tables-config .form-input { padding: 0.45rem 0.55rem; }
+
+/* Painel admin */
+.metric-card { cursor: help; }
+.metric-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+.metric-value {
+  font-size: 1.85rem;
+  font-weight: 800;
+}
+.metric-goal {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.auth-tabs-compact .auth-tab {
+  white-space: nowrap;
+  font-size: 0.78rem;
+  padding-left: 0.3rem;
+  padding-right: 0.3rem;
+}
