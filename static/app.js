@@ -42,6 +42,15 @@ const appState = {
   selectedRestaurantId: 1,
   selectedRestCategoryFilter: "ALL", // ALL | 1-2 | 3-4 | 5+
 
+  // Estado visual (seções recolhíveis, filtros abertos etc.) — sobrevive aos re-renders do SSE
+  ui: {
+    showFilters: false,
+    showHistory: false,
+    showWalkin: false,
+    tableFilter: "ALOCADA", // ALOCADA | LIVRE | INDISPONÍVEL
+    open: {}, // seções recolhíveis abertas, por chave
+  },
+
   // Dados consolidados do backend
   data: null,
 };
@@ -125,7 +134,9 @@ function initSSE() {
         appState.data = packet.state;
         handleRealtimeEvent(packet.event, packet.meta || {});
         await refreshClientState();
-        renderApp();
+        // Em telas de formulário (login, cadastro, perfil) o re-render apagaria o que a
+        // pessoa está digitando; os dados novos aparecem na próxima troca de aba.
+        if (!isOnFormScreen()) renderApp();
       }
     } catch (err) {
       console.error("Erro SSE:", err);
@@ -413,6 +424,7 @@ function selectRestaurantAutocompletePlace(prefix, addressText, lat, lng) {
 
 async function submitRegister(e) {
   e.preventDefault();
+  if (advanceIfNotLastStep(e)) return;
   const name = document.getElementById("regName")?.value;
   const email = document.getElementById("regEmail")?.value;
   const password = document.getElementById("regPassword")?.value;
@@ -657,6 +669,100 @@ function switchClientTab(tab) {
   renderApp();
 }
 
+// ==================== HELPERS DE INTERFACE (MENOS INFORMAÇÃO POR TELA) ====================
+
+function isOnFormScreen() {
+  const view = appState.mainView;
+  if (view === "client") {
+    return !appState.clientAuth.client || appState.clientActiveTab === "perfil";
+  }
+  if (view === "restaurant") {
+    return !appState.restaurantAuth.restaurant || appState.restaurantActiveTab === "perfil";
+  }
+  return false;
+}
+
+// Liga/desliga um flag de appState.ui e re-renderiza (filtros, histórico, walk-in...)
+function toggleUIFlag(flag) {
+  appState.ui[flag] = !appState.ui[flag];
+  renderApp();
+}
+
+function setTableFilter(status) {
+  appState.ui.tableFilter = status;
+  renderApp();
+}
+
+// Seção recolhível de formulário: alterna só no DOM para não perder o que foi digitado
+function toggleSection(key) {
+  appState.ui.open[key] = !appState.ui.open[key];
+  const el = document.querySelector(`[data-section="${key}"]`);
+  if (el) el.classList.toggle("open", appState.ui.open[key]);
+}
+
+// Antes de enviar: abre as seções recolhidas que tenham campo inválido (senão o navegador não consegue mostrar o erro)
+function openInvalidSections(form) {
+  if (!form) return;
+  form.querySelectorAll("input, select, textarea").forEach((field) => {
+    if (field.checkValidity()) return;
+    const section = field.closest("[data-section]");
+    if (section && !section.classList.contains("open")) toggleSection(section.dataset.section);
+  });
+}
+
+function renderSection(key, title, subtitle, bodyHTML) {
+  const isOpen = !!appState.ui.open[key];
+  return `
+    <div class="collapsible ${isOpen ? "open" : ""}" data-section="${key}">
+      <button type="button" class="collapsible-head" onclick="toggleSection('${key}')">
+        <span>
+          <span class="collapsible-title">${title}</span>
+          ${subtitle ? `<span class="collapsible-sub">${subtitle}</span>` : ""}
+        </span>
+        <span class="collapsible-chevron">▾</span>
+      </button>
+      <div class="collapsible-body">${bodyHTML}</div>
+    </div>`;
+}
+
+// Cadastro em etapas: troca de etapa só no DOM, validando os campos da etapa atual
+function goFormStep(btn, delta) {
+  const form = btn.closest("form");
+  if (!form) return;
+  const steps = Array.from(form.querySelectorAll(".form-step"));
+  const current = steps.findIndex((s) => s.classList.contains("active"));
+  if (delta > 0) {
+    const fields = steps[current].querySelectorAll("input, select, textarea");
+    for (const field of fields) {
+      if (!field.reportValidity()) return;
+    }
+  }
+  const next = Math.min(steps.length - 1, Math.max(0, current + delta));
+  steps.forEach((s, i) => s.classList.toggle("active", i === next));
+  form.querySelectorAll(".step-dot").forEach((d, i) => d.classList.toggle("active", i <= next));
+}
+
+// Enter numa etapa intermediária avança a etapa em vez de enviar o cadastro incompleto
+function advanceIfNotLastStep(e) {
+  const form = e.target;
+  const steps = Array.from(form.querySelectorAll(".form-step"));
+  if (steps.length === 0) return false;
+  const current = steps.findIndex((s) => s.classList.contains("active"));
+  if (current < steps.length - 1) {
+    const btn = steps[current].querySelector("[data-step-next]");
+    if (btn) goFormStep(btn, 1);
+    return true;
+  }
+  return false;
+}
+
+function renderStepDots(labels) {
+  return `
+    <div class="step-dots">
+      ${labels.map((l, i) => `<span class="step-dot ${i === 0 ? "active" : ""}">${i + 1}. ${l}</span>`).join("")}
+    </div>`;
+}
+
 function toggleCuisineSelection(chipEl) {
   const selected = document.querySelectorAll(".cuisine-chip.selected");
   if (!chipEl.classList.contains("selected") && selected.length >= 3) {
@@ -735,32 +841,24 @@ function openRestaurantModal(restId) {
         title="Localização de ${rest.name}"
       ></iframe>
 
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; font-size:0.8rem;">
-        <span style="color:var(--text-muted);">📍 ${rest.address}</span>
-        <a href="${rest.maps_external_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rest.name)}`}" target="_blank" class="btn btn-outline btn-sm" style="font-size:0.72rem;">
-          🗺️ Abrir Maps
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:1rem; font-size:0.82rem;">
+        <span>
+          <strong>~${rest.estimated_wait_min ?? 15} min</strong> de espera • ${rest.distance_walk_min} min a pé
+        </span>
+        <a href="${rest.maps_external_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(rest.name)}`}" target="_blank" class="btn-link" style="white-space:nowrap;">
+          Abrir mapa
         </a>
-      </div>
-
-      <div style="background:var(--bg-surface); padding:0.85rem; border-radius:12px; margin-bottom:1rem; border:1px solid var(--border);">
-        <div style="display:flex; justify-content:space-between; margin-bottom:0.5rem;">
-          <span style="font-weight:700; font-size:0.85rem;">Tempo de Espera Atual:</span>
-          <span class="badge badge-emerald">~${rest.estimated_wait_min ?? 15} min</span>
-        </div>
-        <div style="font-size:0.75rem; color:var(--text-muted);">
-          Distância: <strong>${rest.distance_meters ?? 300}m</strong> (${rest.distance_walk_min} min a pé do seu escritório)
-        </div>
       </div>
 
       <!-- Seletor de Mesa (Quantidade de Pessoas) -->
       <div style="margin-bottom:1.15rem;">
-        <label class="form-label">Selecione o tamanho da mesa:</label>
+        <label class="form-label">Quantas pessoas?</label>
         <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:0.4rem;">
           ${[
-            { n: 2, lbl: "1-2 lug.", cat: "1-2" },
-            { n: 4, lbl: "3-4 lug.", cat: "3-4" },
-            { n: 6, lbl: "5-6 lug.", cat: "5+" },
-            { n: 8, lbl: "8+ lug.", cat: "5+" },
+            { n: 2, lbl: "1-2", cat: "1-2" },
+            { n: 4, lbl: "3-4", cat: "3-4" },
+            { n: 6, lbl: "5-6", cat: "5+" },
+            { n: 8, lbl: "8+", cat: "5+" },
           ]
             .map(
               (item) => `
@@ -779,10 +877,10 @@ function openRestaurantModal(restId) {
 
       <div style="display:flex; flex-direction:column; gap:0.6rem;">
         <button class="btn btn-primary btn-block btn-lg" onclick="confirmReservation(${rest.id})">
-          ✓ Confirmar Reserva (Entrar na Fila)
+          Entrar na fila
         </button>
-        <a href="${rest.whatsapp_url}" target="_blank" class="btn btn-whatsapp btn-block">
-          💬 Falar com o Restaurante (WhatsApp)
+        <a href="${rest.whatsapp_url}" target="_blank" class="btn-link" style="text-align:center;">
+          💬 Falar com o restaurante
         </a>
       </div>
     </div>
@@ -1011,7 +1109,7 @@ function renderCallAlertsHint() {
   if (Notification.permission === "default") {
     return `
       <button type="button" class="btn btn-outline btn-block btn-sm" onclick="unlockAudio(); requestCallNotificationPermission()">
-        🔔 Ativar alerta no navegador quando minha mesa for chamada
+        🔔 Me avisar quando a mesa ficar pronta
       </button>`;
   }
   if (Notification.permission === "denied") {
@@ -1169,220 +1267,206 @@ function renderAuthScreen() {
             <input type="password" id="loginPassword" class="form-input" placeholder="••••••••" />
           </div>
           <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:0.85rem;">
-            Acessar o CLTempo
+            Entrar
           </button>
         </form>
       ` : `
         <form onsubmit="submitRegister(event)">
-          <div class="form-group">
-            <label class="form-label">Nome Completo</label>
-            <input type="text" id="regName" class="form-input" placeholder="Seu Nome" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">E-mail</label>
-            <input type="email" id="regEmail" class="form-input" placeholder="seu.email@gmail.com" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Senha</label>
-            <input type="password" id="regPassword" class="form-input" placeholder="Mínimo 4 caracteres" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Telefone (WhatsApp)</label>
-            <input type="tel" id="regPhone" class="form-input" placeholder="21987654321" required />
-          </div>
-          <div class="form-group autocomplete-wrap">
-            <label class="form-label">Local de Trabalho</label>
-            <input 
-              type="text" 
-              id="regWorkplace" 
-              class="form-input" 
-              placeholder="Digite o nome ou endereço do edifício..." 
-              required 
-              autocomplete="off"
-              oninput="handleWorkplaceInput('reg')"
-              onfocus="handleWorkplaceInput('reg')"
-            />
-            <div id="regPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
-            <div id="regWorkplaceBadge" style="margin-top:0.35rem; display:none;"></div>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Hoje, sem o app, quantos minutos você costuma esperar em pé na fila do almoço?</label>
-            <input type="number" id="regBaseline" class="form-input" min="0" max="120" placeholder="Ex.: 35 (opcional)" />
+          ${renderStepDots(["Sua conta", "Seu almoço"])}
+
+          <div class="form-step active">
+            <div class="form-group">
+              <label class="form-label">Nome</label>
+              <input type="text" id="regName" class="form-input" placeholder="Seu nome" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">E-mail</label>
+              <input type="email" id="regEmail" class="form-input" placeholder="seu.email@gmail.com" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Senha</label>
+              <input type="password" id="regPassword" class="form-input" placeholder="Mínimo 4 caracteres" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">WhatsApp</label>
+              <input type="tel" id="regPhone" class="form-input" placeholder="21987654321" required />
+            </div>
+            <div class="form-group autocomplete-wrap">
+              <label class="form-label">Onde você trabalha?</label>
+              <input
+                type="text"
+                id="regWorkplace"
+                class="form-input"
+                placeholder="Nome ou endereço do prédio"
+                required
+                autocomplete="off"
+                oninput="handleWorkplaceInput('reg')"
+                onfocus="handleWorkplaceInput('reg')"
+              />
+              <div id="regPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+              <div id="regWorkplaceBadge" style="margin-top:0.35rem; display:none;"></div>
+            </div>
+            <button type="button" class="btn btn-primary btn-block btn-lg" data-step-next onclick="goFormStep(this, 1)">
+              Continuar
+            </button>
           </div>
 
-          <div class="form-group">
-            <label class="form-label">Quais as três comidas que você mais AMA?</label>
-            <div class="cuisine-grid">
-              ${popularCuisines.map((c, i) => `
-                <div 
-                  class="cuisine-chip ${i < 3 ? "selected" : ""}" 
-                  data-value="${c.name}"
-                  onclick="toggleCuisineSelection(this)"
-                >
-                  ${c.icon ? c.icon + " " : ""}${c.name}
-                </div>
-              `).join("")}
+          <div class="form-step">
+            <div class="form-group">
+              <label class="form-label">Escolha até 3 comidas favoritas</label>
+              <div class="cuisine-grid">
+                ${popularCuisines.map((c, i) => `
+                  <div
+                    class="cuisine-chip ${i < 3 ? "selected" : ""}"
+                    data-value="${c.name}"
+                    onclick="toggleCuisineSelection(this)"
+                  >
+                    ${c.icon ? c.icon + " " : ""}${c.name}
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Quais vales-refeição você tem?</label>
+              <div class="vr-grid">
+                ${availableVRs.map((vr, i) => `
+                  <div
+                    class="vr-chip reg-vr-chip ${i < 2 ? "selected" : ""}"
+                    data-value="${vr}"
+                    onclick="toggleVRSelection(this)"
+                  >
+                    ${vr}
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Sem o app, quantos minutos você espera em pé na fila? <span class="form-hint">(opcional)</span></label>
+              <input type="number" id="regBaseline" class="form-input" min="0" max="120" placeholder="Ex.: 35" />
+            </div>
+
+            <div style="display:flex; gap:0.5rem;">
+              <button type="button" class="btn btn-outline btn-lg" onclick="goFormStep(this, -1)">Voltar</button>
+              <button type="submit" class="btn btn-primary btn-block btn-lg">Criar conta</button>
             </div>
           </div>
-
-          <div class="form-group">
-            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-              <span>Quais VRs você possui? </span>
-              <span style="font-size:0.7rem; color:var(--text-muted); font-weight:normal;">Pode marcar mais de um ;)</span>
-            </label>
-            <div class="vr-grid">
-              ${availableVRs.map((vr, i) => `
-                <div 
-                  class="vr-chip reg-vr-chip ${i < 2 ? "selected" : ""}" 
-                  data-value="${vr}"
-                  onclick="toggleVRSelection(this)"
-                >
-                  💳 ${vr}
-                </div>
-              `).join("")}
-            </div>
-          </div>
-
-          <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:1rem;">
-            Concluir Cadastro
-          </button>
         </form>
       `}
 
-      <!-- Atalhos de Demonstração Rápida -->
-      <div style="margin-top:1.5rem; padding-top:1rem; border-top:1px dashed var(--border); text-align:center;">
-        <div style="font-size:0.72rem; color:var(--text-muted); font-weight:700; text-transform:uppercase; margin-bottom:0.45rem;">
-          Acesso Rápido para a Banca (Demo):
+      ${isLogin ? `
+        <!-- Atalhos de Demonstração Rápida -->
+        <div class="demo-shortcuts">
+          <div class="demo-shortcuts-title">Acesso rápido (demo)</div>
+          <div class="demo-shortcuts-row">
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(1)">Vivian</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(2)">Arthur</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(3)">Carolina</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(4)">Fernando</button>
+          </div>
         </div>
-        <div style="display:flex; gap:0.35rem; justify-content:center; flex-wrap:wrap;">
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(1)">Vivian</button>
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(2)">Arthur</button>
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(3)">Carolina</button>
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginAs(4)">Fernando</button>
-        </div>
-      </div>
+      ` : ""}
     </div>
   `;
 }
 
 function renderClientBuscarTab() {
-  const client = appState.clientAuth.client;
   const f = appState.searchFilters;
+  const showFilters = appState.ui.showFilters;
 
   const cuisines = [
     "TODOS",
     ...getAvailableCuisines().map((c) => c.name),
   ];
 
+  const hasCustomFilters = f.max_wait_min < 60 || f.radius_km !== 3.0;
+
   const resultsHTML = appState.searchResults.length === 0 ? `
-    <div style="text-align:center; padding:2rem 1rem; color:var(--text-muted); font-size:0.85rem; background:var(--bg-surface); border-radius:14px;">
-      Nenhum restaurante encontrado com os filtros selecionados.<br>
-      <span style="font-size:0.75rem;">Tente aumentar o raio geográfico ou o tempo de espera.</span>
+    <div class="empty-state">
+      Nenhum restaurante com esses filtros.<br>
+      <span style="font-size:0.75rem;">Tente aumentar a distância ou o tempo de espera.</span>
     </div>
-  ` : appState.searchResults.map((r) => {
-    return `
+  ` : appState.searchResults.map((r) => `
       <div class="restaurant-card" onclick="openRestaurantModal(${r.id})">
         <div class="restaurant-card-header">
           <div>
             <div style="font-weight:700; font-size:0.95rem;">${r.name}</div>
             <div style="font-size:0.74rem; color:var(--text-muted);">
-              ${r.category} • 📍 ${r.distance_meters ?? 300}m (${r.distance_walk_min} min a pé)
+              ${r.category} • ${r.distance_walk_min} min a pé
             </div>
           </div>
-          <span class="badge badge-score" title="Score de relevância baseado no seu perfil e filtros (máximo 100)">
-            ★ Score ${Math.min(100, Math.round(r.score))}/100
+          <span class="badge ${r.waiting_in_category > 0 ? "badge-orange" : "badge-emerald"}">
+            ${r.waiting_in_category === 0 ? "Sem fila" : `~${r.estimated_wait_min} min`}
           </span>
         </div>
-
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.75rem; flex-wrap:wrap; gap:0.4rem;">
-          <div style="display:flex; gap:0.35rem; align-items:center;">
-            <span class="badge ${r.waiting_in_category > 0 ? "badge-orange" : "badge-emerald"}">
-              ${r.waiting_in_category === 0 ? "Fila livre" : `${r.waiting_in_category} grupos na fila`}
-            </span>
-            <span style="font-size:0.74rem; color:var(--text-muted);">
-              ~${r.estimated_wait_min} min
-            </span>
-          </div>
-
-          <div style="display:flex; gap:0.35rem;">
-            <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); openRestaurantModal(${r.id})">
-              Ver Mesa & Entrar
-            </button>
-          </div>
-        </div>
       </div>
-    `;
-  }).join("");
+    `).join("");
 
   return `
-    <!-- Teaser de Recomendações Futuras -->
-    <div class="promo-banner">
-      <div style="font-size:1.25rem;">✨</div>
-      <div>
-        <div style="font-weight:700;">Recomendações para você</div>
-        <div style="font-size:0.72rem; color:var(--text-muted);">
-          Com base em: <strong>${client.pref_food_1}</strong>, <strong>${client.pref_food_2}</strong> e <strong>${client.pref_food_3}</strong>
-        </div>
-      </div>
-    </div>
-
-    <!-- Controles de Busca com Filtros -->
+    <!-- Busca + culinária (sempre visíveis) -->
     <div class="search-controls">
-      <div class="form-group" style="margin-bottom:0.5rem;">
-        <input 
-          type="text" 
-          class="form-input" 
-          placeholder="🔍 Buscar restaurante" 
+      <div style="display:flex; gap:0.4rem; margin-bottom:0.5rem;">
+        <input
+          type="text"
+          class="form-input"
+          placeholder="🔍 Buscar restaurante"
           value="${f.name}"
           oninput="onSearchInput(this.value)"
         />
+        <button
+          type="button"
+          class="btn btn-sm ${showFilters || hasCustomFilters ? "btn-primary" : "btn-outline"}"
+          style="white-space:nowrap;"
+          onclick="toggleUIFlag('showFilters')"
+          title="Tempo máximo e distância"
+        >
+          ⚙️ Filtros
+        </button>
       </div>
 
-      <!-- Filtro por Culinária (Chips) -->
       <div class="chips-row">
         ${cuisines.map((c) => `
-          <div 
+          <div
             class="filter-chip ${f.cuisine_type === c ? "active" : ""}"
             onclick="onCuisineFilter('${c}')"
           >
-            ${c}
+            ${c === "TODOS" ? "Todos" : c}
           </div>
         `).join("")}
       </div>
 
-      <!-- Sliders: Tempo Máximo e Raio Geográfico -->
-      <div class="range-wrap">
-        <span>Tempo Máximo: <strong>${f.max_wait_min >= 60 ? "Até 60 min" : `Até ${f.max_wait_min} min`}</strong></span>
-        <input 
-          type="range" 
-          class="range-input" 
-          min="10" 
-          max="60" 
-          step="5" 
-          value="${f.max_wait_min}" 
-          oninput="onMaxWaitFilter(this.value)" 
-        />
-      </div>
+      ${showFilters ? `
+        <div class="range-wrap">
+          <span>Espera de até <strong>${f.max_wait_min} min</strong></span>
+          <input
+            type="range"
+            class="range-input"
+            min="10"
+            max="60"
+            step="5"
+            value="${f.max_wait_min}"
+            oninput="onMaxWaitFilter(this.value)"
+          />
+        </div>
 
-      <div class="range-wrap">
-        <span>Raio Geográfico: <strong>${f.radius_km.toFixed(1)} km</strong></span>
-        <input 
-          type="range" 
-          class="range-input" 
-          min="0.5" 
-          max="5.0" 
-          step="0.5" 
-          value="${f.radius_km}" 
-          oninput="onRadiusFilter(this.value)" 
-        />
-      </div>
+        <div class="range-wrap">
+          <span>Até <strong>${f.radius_km.toFixed(1)} km</strong> do trabalho</span>
+          <input
+            type="range"
+            class="range-input"
+            min="0.5"
+            max="5.0"
+            step="0.5"
+            value="${f.radius_km}"
+            oninput="onRadiusFilter(this.value)"
+          />
+        </div>
+      ` : ""}
     </div>
 
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.65rem;">
-      <span style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-        Restaurantes Encontrados (${appState.searchResults.length})
-      </span>
-      <span style="font-size:0.72rem; color:var(--text-muted);">Ordenado por Score (máx. 100) ★</span>
+    <div class="section-label">
+      ${appState.searchResults.length} restaurante(s) para você
     </div>
 
     <div class="restaurants-list">
@@ -1391,181 +1475,133 @@ function renderClientBuscarTab() {
   `;
 }
 
+function renderClientTicketCard(ticket) {
+  const st = (ticket.status || "").toUpperCase();
+  const isCalled = st === "CHAMADO" || st === "CALLED";
+  const isSeated = st === "SENTADO" || st === "SEATED";
+
+  let statusBadge = `<span class="badge badge-orange">⏳ Na fila</span>`;
+  if (isCalled) statusBadge = `<span class="badge badge-emerald">🔔 Sua mesa está pronta</span>`;
+  else if (isSeated) statusBadge = `<span class="badge badge-blue">🍽️ Bom apetite</span>`;
+
+  // Informação principal muda conforme o momento: posição na fila, ou a mesa
+  let highlight = "";
+  if (isCalled || isSeated) {
+    highlight = `
+      <div class="ticket-highlight">
+        <div class="ticket-highlight-val">Mesa ${ticket.table_number || "—"}</div>
+        <div class="ticket-highlight-lbl">${isCalled ? "Dirija-se à mesa" : "Você está sentado"}</div>
+      </div>`;
+  } else {
+    highlight = `
+      <div class="ticket-metrics-grid" style="grid-template-columns:repeat(2, 1fr);">
+        <div class="ticket-metric-box">
+          <div class="ticket-metric-val">${ticket.position}º</div>
+          <div class="ticket-metric-lbl">Posição</div>
+        </div>
+        <div class="ticket-metric-box">
+          <div class="ticket-metric-val">~${ticket.estimated_wait_min} min</div>
+          <div class="ticket-metric-lbl">Espera</div>
+        </div>
+      </div>`;
+  }
+
+  let actions = "";
+  if (isCalled) {
+    actions = `
+      <button class="btn btn-emerald btn-block btn-lg" onclick="confirmCheckin(${ticket.id})">
+        Cheguei
+      </button>
+      <button class="btn-link" onclick="cancelTicket(${ticket.id})">Cancelar reserva</button>`;
+  } else if (isSeated) {
+    actions = (ticket.perceived_standing_wait_min === null || ticket.perceived_standing_wait_min === undefined) ? `
+      <button class="btn btn-primary btn-block" onclick="openFeedbackModal(${ticket.id})">
+        ⏱️ Quanto tempo você ficou em pé?
+      </button>
+    ` : `
+      <div style="font-size:0.75rem; color:var(--text-muted); text-align:center;">
+        ✅ Obrigado pela resposta!
+      </div>`;
+  } else {
+    actions = `
+      ${renderCallAlertsHint()}
+      <button class="btn-link" onclick="cancelTicket(${ticket.id})">Sair da fila</button>`;
+  }
+
+  return `
+    <div class="active-ticket ${isCalled ? "called" : ""}">
+      ${statusBadge}
+      <div style="margin:0.6rem 0 0.75rem 0;">
+        <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+          ${ticket.restaurant_name}
+        </div>
+        <div style="font-size:0.75rem; color:var(--text-muted);">
+          ${ticket.party_size} pessoa(s) •
+          <a href="${ticket.whatsapp_url}" target="_blank" style="color:var(--text-muted);">💬 WhatsApp</a>
+        </div>
+      </div>
+      ${highlight}
+      <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.85rem;">
+        ${actions}
+      </div>
+    </div>`;
+}
+
 function renderClientFilaTab() {
   const ticket = appState.clientActiveTicket;
   const history = appState.clientHistory || [];
+  const showHistory = appState.ui.showHistory;
+  const pending = pendingFeedbackEntries();
 
   return `
-    <!-- Parte Superior: Reserva Atual -->
-    <div style="margin-bottom:1.5rem;">
-      <div style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:0.55rem;">
-        Reserva Atual
-      </div>
-
-      ${ticket ? `
-        <div class="active-ticket ${ticket.status === "CALLED" || ticket.status === "CHAMADO" ? "called" : ""}">
-          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.4rem;">
-            ${(() => {
-              const st = (ticket.status || "").toUpperCase();
-              if (st === "CHAMADO" || st === "CALLED") {
-                return `<span class="badge badge-emerald" style="font-weight:800; font-size:0.8rem;">🔔 CHAMADO</span>`;
-              } else if (st === "SENTADO" || st === "SEATED") {
-                return `<span class="badge badge-blue" style="font-weight:800; font-size:0.8rem;">🪑 SENTADO</span>`;
-              } else if (st === "CANCELADO" || st === "CANCELLED") {
-                return `<span class="badge badge-amber" style="font-weight:800; font-size:0.8rem;">⚠️ CANCELADO</span>`;
-              } else if (st === "ENCERRADO") {
-                return `<span class="badge badge-gray" style="font-weight:800; font-size:0.8rem;">✅ ENCERRADO</span>`;
-              } else {
-                return `<span class="badge badge-orange" style="font-weight:800; font-size:0.8rem;">⏳ AGUARDANDO</span>`;
-              }
-            })()}
-
-            ${(ticket.table_number && (ticket.status === "CHAMADO" || ticket.status === "CALLED" || ticket.status === "SENTADO" || ticket.status === "SEATED")) ? `
-              <span class="badge badge-purple" style="font-weight:800; font-size:0.82rem;">
-                🪑 Mesa ${ticket.table_number}
-              </span>
-            ` : ""}
-          </div>
-
-          <div style="margin:0.75rem 0 0.35rem 0;">
-            <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
-              ${ticket.restaurant_name}
-            </div>
-            <div style="font-size:0.75rem; color:var(--text-muted);">
-              Mesa para ${ticket.party_size} pessoa(s) • Entrou às ${ticket.joined_at}
-              ${(ticket.table_number && (ticket.status === "CHAMADO" || ticket.status === "CALLED" || ticket.status === "SENTADO" || ticket.status === "SEATED")) ? ` • <strong style="color:var(--text);">Dirija-se à Mesa ${ticket.table_number}</strong>` : ""}
-            </div>
-          </div>
-
-          <div class="ticket-metrics-grid">
-            <div class="ticket-metric-box">
-              <div class="ticket-metric-val">${(ticket.status === "CALLED" || ticket.status === "CHAMADO" || ticket.status === "SENTADO" || ticket.status === "SEATED") ? "Agora" : `${ticket.position}º`}</div>
-              <div class="ticket-metric-lbl">Posição</div>
-            </div>
-            <div class="ticket-metric-box">
-              <div class="ticket-metric-val">${(ticket.status === "CALLED" || ticket.status === "CHAMADO" || ticket.status === "SENTADO" || ticket.status === "SEATED") ? "0m" : `~${ticket.estimated_wait_min}m`}</div>
-              <div class="ticket-metric-lbl">Tempo Restante</div>
-            </div>
-            <div class="ticket-metric-box">
-              <div class="ticket-metric-val">${ticket.party_size}p</div>
-              <div class="ticket-metric-lbl">Tamanho</div>
-            </div>
-          </div>
-
-          <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.85rem;">
-            <a href="${ticket.whatsapp_url}" target="_blank" class="btn btn-whatsapp btn-block">
-              💬 Falar com o Restaurante (WhatsApp)
-            </a>
-
-            ${(ticket.status === "CALLED" || ticket.status === "CHAMADO") ? `
-              <div style="display:flex; gap:0.4rem;">
-                <button class="btn btn-emerald btn-block" onclick="confirmCheckin(${ticket.id})">
-                  Confirmar Chegada
-                </button>
-                <button class="btn btn-rose btn-sm" onclick="cancelTicket(${ticket.id})">
-                  Cancelar
-                </button>
-              </div>
-            ` : (ticket.status === "SENTADO" || ticket.status === "SEATED") ? `
-              <div style="text-align:center; padding:0.6rem; background:rgba(16, 185, 129, 0.08); border-radius:10px; font-size:0.8rem; color:var(--emerald-text); font-weight:700;">
-                🍽️ Bom apetite! Atendimento presencial na Mesa ${ticket.table_number || ""}.
-              </div>
-              ${(ticket.perceived_standing_wait_min === null || ticket.perceived_standing_wait_min === undefined) ? `
-                <button class="btn btn-primary btn-block btn-sm" onclick="openFeedbackModal(${ticket.id})">
-                  ⏱️ Quanto tempo você ficou em pé? (10 segundos)
-                </button>
-              ` : `
-                <div style="font-size:0.75rem; color:var(--text-muted); text-align:center;">
-                  ✅ Obrigado! Você informou ${ticket.perceived_standing_wait_min} min em pé.
-                </div>
-              `}
-            ` : `
-              <button class="btn btn-outline btn-block btn-sm" onclick="cancelTicket(${ticket.id})">
-                Sair da Fila
-              </button>
-              ${renderCallAlertsHint()}
-            `}
-          </div>
-        </div>
-      ` : `
-        <div style="text-align:center; padding:2rem 1.25rem; background:var(--bg-surface); border-radius:16px; border:1px dashed var(--border);">
+    <div style="margin-bottom:1.25rem;">
+      ${ticket ? renderClientTicketCard(ticket) : `
+        <div class="empty-state" style="padding:2rem 1.25rem;">
           <div style="font-size:2rem; margin-bottom:0.5rem;">☕</div>
-          <div style="font-weight:700; font-size:0.95rem;">Nenhuma reserva ativa</div>
-          <p style="font-size:0.75rem; color:var(--text-muted); margin:0.35rem 0 0.85rem 0;">
-            Você está livre no momento. Que tal escolher onde almoçar hoje?
-          </p>
-          <button class="btn btn-primary btn-sm" onclick="switchClientTab('buscar')">
-            🔍 Buscar Restaurantes
+          <div style="font-weight:700; font-size:0.95rem; color:var(--text);">Você não está em nenhuma fila</div>
+          <button class="btn btn-primary btn-sm" style="margin-top:0.85rem;" onclick="switchClientTab('buscar')">
+            Escolher restaurante
           </button>
         </div>
       `}
     </div>
 
-    <!-- Parte Inferior: Histórico de Reservas -->
-    <div>
-      ${(() => {
-        const pending = pendingFeedbackEntries();
-        if (pending.length === 0) return "";
-        const last = pending[0];
-        return `
-          <div class="card" style="margin-bottom:0.85rem; border-color:var(--primary); display:flex; justify-content:space-between; align-items:center; gap:0.6rem; flex-wrap:wrap;">
-            <div style="font-size:0.8rem;">
-              <strong>Como foi sua espera em ${last.restaurant_name}?</strong><br/>
-              <span style="color:var(--text-muted);">Responda em 10 segundos e ajude a validar o CLTempo.</span>
-            </div>
-            <button class="btn btn-primary btn-sm" onclick="openFeedbackModal(${last.id})">Responder</button>
-          </div>`;
-      })()}
-      <div style="font-size:0.74rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:0.55rem;">
-        Histórico de Reservas
+    ${!ticket && pending.length > 0 ? `
+      <div class="card" style="margin-bottom:0.85rem; border-color:var(--primary); display:flex; justify-content:space-between; align-items:center; gap:0.6rem;">
+        <div style="font-size:0.8rem;">
+          <strong>Como foi sua espera em ${pending[0].restaurant_name}?</strong>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openFeedbackModal(${pending[0].id})">Responder</button>
       </div>
+    ` : ""}
 
-      ${history.length === 0 ? `
-        <div style="font-size:0.78rem; color:var(--text-muted); text-align:center; padding:1.5rem; background:var(--bg-card); border-radius:12px; border:1px solid var(--border);">
-          Seu histórico de reservas concluídas aparecerá aqui.
+    ${history.length > 0 ? `
+      <button type="button" class="btn btn-outline btn-block btn-sm" onclick="toggleUIFlag('showHistory')">
+        ${showHistory ? "Ocultar histórico ▴" : `Ver histórico (${history.length}) ▾`}
+      </button>
+      ${showHistory ? `
+        <div class="history-list">
+          ${history.map((h) => {
+            const st = (h.status || "").toUpperCase();
+            const cancelled = st === "CANCELADO" || st === "CANCELLED" || st === "NO_SHOW";
+            const needsFeedback = !cancelled && isServedStatus(h.status) &&
+              (h.perceived_standing_wait_min === null || h.perceived_standing_wait_min === undefined);
+            return `
+              <div class="history-item">
+                <div>
+                  <div style="font-weight:700; font-size:0.85rem;">${h.restaurant_name}</div>
+                  <div style="font-size:0.72rem; color:var(--text-muted);">${h.joined_at}</div>
+                </div>
+                ${cancelled
+                  ? `<span class="badge badge-amber">Cancelado</span>`
+                  : needsFeedback
+                    ? `<button class="btn btn-outline btn-sm" onclick="openFeedbackModal(${h.id})">Avaliar</button>`
+                    : `<span class="badge badge-emerald">Atendido</span>`}
+              </div>`;
+          }).join("")}
         </div>
-      ` : `
-        <div class="card" style="padding:0.5rem; overflow-x:auto;">
-          <table class="history-table">
-            <thead>
-              <tr>
-                <th>Restaurante</th>
-                <th>Mesa</th>
-                <th>Status</th>
-                <th>Horário</th>
-                <th>Em pé</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${history.map((h) => {
-                const st = (h.status || "").toUpperCase();
-                let badge = `<span class="badge badge-emerald">Atendido</span>`;
-                if (st === "CANCELADO" || st === "CANCELLED" || st === "NO_SHOW") {
-                  badge = `<span class="badge badge-amber">Cancelado</span>`;
-                } else if (st === "SENTADO" || st === "SEATED" || st === "ENCERRADO") {
-                  badge = `<span class="badge badge-emerald">Atendido</span>`;
-                }
-                return `
-                  <tr>
-                    <td><strong>${h.restaurant_name}</strong></td>
-                    <td>${h.party_size}p (${h.table_category})</td>
-                    <td>${badge}</td>
-                    <td style="color:var(--text-muted);">${h.joined_at}</td>
-                    <td>${
-                      h.perceived_standing_wait_min !== null && h.perceived_standing_wait_min !== undefined
-                        ? `${h.perceived_standing_wait_min} min`
-                        : isServedStatus(h.status)
-                          ? `<button class="btn btn-outline btn-sm" onclick="openFeedbackModal(${h.id})">Avaliar</button>`
-                          : `<span style="color:var(--text-muted);">—</span>`
-                    }</td>
-                  </tr>
-                `;
-              }).join("")}
-            </tbody>
-          </table>
-        </div>
-      `}
-    </div>
+      ` : ""}
+    ` : ""}
   `;
 }
 
@@ -1573,110 +1609,74 @@ function renderClientPerfilTab() {
   const client = appState.clientAuth.client;
 
   const popularCuisines = getAvailableCuisines();
-
-  const availableVRs = [
-    "Alelo", "Ticket", "Sodexo / Pluxee", "VR Refeição",
-    "Flash", "Caju", "Swile", "iFood Benefícios"
-  ];
-
   const currentPrefs = [client.pref_food_1, client.pref_food_2, client.pref_food_3].filter(Boolean);
-  const currentVRStr = client.meal_vouchers || client.vr_card || "Alelo, Ticket";
-  const currentVRList = currentVRStr.split(",").map((v) => v.trim().toLowerCase());
+  const vrText = client.meal_vouchers || client.vr_card || "—";
+
+  const dadosHTML = `
+    <div class="form-group">
+      <label class="form-label">Nome</label>
+      <input type="text" id="profName" class="form-input" value="${client.name}" required />
+    </div>
+    <div class="form-group">
+      <label class="form-label">WhatsApp</label>
+      <input type="tel" id="profPhone" class="form-input" value="${client.phone || ""}" required />
+    </div>
+    <div class="form-group autocomplete-wrap">
+      <label class="form-label">Onde você trabalha?</label>
+      <input
+        type="text"
+        id="profWorkplace"
+        class="form-input"
+        value="${client.workplace || client.company || ""}"
+        required
+        autocomplete="off"
+        oninput="handleWorkplaceInput('prof')"
+        onfocus="handleWorkplaceInput('prof')"
+      />
+      <div id="profPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+      <div id="profWorkplaceBadge" style="margin-top:0.35rem; display:none;"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Nova senha <span class="form-hint">(deixe em branco para manter)</span></label>
+      <input type="password" id="profPassword" class="form-input" />
+    </div>`;
+
+  const prefsHTML = `
+    <div class="form-group">
+      <label class="form-label">Até 3 comidas favoritas</label>
+      <div class="cuisine-grid">
+        ${popularCuisines.map((c) => `
+          <div
+            class="cuisine-chip profile-cuisine-chip ${currentPrefs.includes(c.name) ? "selected" : ""}"
+            data-value="${c.name}"
+            onclick="toggleProfileCuisineSelection(this)"
+          >
+            ${c.icon ? c.icon + " " : ""}${c.name}
+          </div>
+        `).join("")}
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Vales-refeição</label>
+      <button type="button" class="btn btn-outline btn-sm" onclick="openEditVRModal()">💳 ${vrText} — alterar</button>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Sem o app, quantos minutos você esperava em pé?</label>
+      <input type="number" id="profBaseline" class="form-input" min="0" max="120" value="${client.baseline_standing_wait_min ?? ""}" placeholder="Ex.: 35" />
+    </div>`;
 
   return `
-    <div class="card" style="margin-bottom:1rem;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem;">
-        <div>
-          <div style="font-size:0.75rem; color:var(--text-muted);">Meu Perfil CLTempo</div>
-          <div style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">${client.name}</div>
-        </div>
-        <div 
-          class="vr-badge-clickable badge badge-blue" 
-          onclick="openEditVRModal()" 
-          title="Clique para alterar seus cartões VR"
-        >
-          💳 ${client.meal_vouchers || client.vr_card}
-        </div>
-      </div>
+    <form onsubmit="submitProfileUpdate(event)">
+      ${renderSection("cliDados", "Meus dados", client.email || "", dadosHTML)}
+      ${renderSection("cliPrefs", "Preferências de almoço", currentPrefs.join(", "), prefsHTML)}
+      <button type="submit" class="btn btn-primary btn-block" style="margin-top:0.85rem;" onclick="openInvalidSections(this.form)">
+        Salvar alterações
+      </button>
+    </form>
 
-      <form onsubmit="submitProfileUpdate(event)">
-        <div class="form-group">
-          <label class="form-label">Nome Completo</label>
-          <input type="text" id="profName" class="form-input" value="${client.name}" required />
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">E-mail</label>
-          <input type="email" class="form-input" value="${client.email || ""}" disabled style="opacity:0.7;" />
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Telefone (WhatsApp)</label>
-          <input type="tel" id="profPhone" class="form-input" value="${client.phone || ""}" required />
-        </div>
-
-        <div class="form-group autocomplete-wrap">
-          <label class="form-label">Local de Trabalho</label>
-          <input 
-            type="text" 
-            id="profWorkplace" 
-            class="form-input" 
-            value="${client.workplace || client.company || ""}" 
-            required 
-            autocomplete="off"
-            oninput="handleWorkplaceInput('prof')"
-            onfocus="handleWorkplaceInput('prof')"
-          />
-          <div id="profPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
-          <div id="profWorkplaceBadge" style="font-size:0.73rem; margin-top:0.35rem; color:var(--text-muted);">
-            📍 Coordenadas: <strong>${client.lat ? Number(client.lat).toFixed(4) : "-22.9035"}, ${client.lng ? Number(client.lng).toFixed(4) : "-43.1780"}</strong> (localizado)
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">3 comidas que você mais gosta</label>
-          <div class="cuisine-grid">
-            ${popularCuisines.map((c) => {
-              const isSelected = currentPrefs.includes(c.name);
-              return `
-                <div 
-                  class="cuisine-chip profile-cuisine-chip ${isSelected ? "selected" : ""}" 
-                  data-value="${c.name}"
-                  onclick="toggleProfileCuisineSelection(this)"
-                >
-                  ${c.icon ? c.icon + " " : ""}${c.name}
-                </div>
-              `;
-            }).join("")}
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Sem o app, quantos minutos você esperava em pé na fila do almoço?</label>
-          <input type="number" id="profBaseline" class="form-input" min="0" max="120" value="${client.baseline_standing_wait_min ?? ""}" placeholder="Ex.: 35" />
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Nova Senha</label>
-          <input type="password" id="profPassword" class="form-input" placeholder="Deixe em branco para não alterar" />
-        </div>
-
-        <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:0.85rem;">
-          Salvar Alterações
-        </button>
-      </form>
-    </div>
-
-    <!-- Zona de Ações da Conta -->
-    <div class="card" style="border-color:var(--border);">
-      <div style="display:flex; flex-direction:column; gap:0.65rem;">
-        <button type="button" class="btn btn-outline btn-block" onclick="clientLogout()">
-          🚪 Sair da Conta
-        </button>
-        <button type="button" class="btn btn-rose btn-block" onclick="submitProfileDelete()">
-          🗑️ Apagar Perfil Cadastrado
-        </button>
-      </div>
+    <div class="account-actions">
+      <button type="button" class="btn btn-outline btn-block" onclick="clientLogout()">Sair da conta</button>
+      <button type="button" class="btn-link btn-link-danger" onclick="submitProfileDelete()">Apagar minha conta</button>
     </div>
   `;
 }
@@ -1706,9 +1706,6 @@ function renderClientAppView() {
           <div style="font-weight:800; font-size:0.95rem; font-family:'Plus Jakarta Sans', sans-serif;">
             ${client.name}
           </div>
-        </div>
-        <div style="display:flex; gap:0.35rem; align-items:center;">
-          <span class="badge badge-emerald">Online</span>
         </div>
       </div>
 
@@ -1792,7 +1789,7 @@ function toggleRestaurantRegisterVR(vr) {
   } else {
     appState.restaurantAuth.registerVRs = [...current, vr];
   }
-  renderApp();
+  syncVRChips(".reg-rest-vr-chip", appState.restaurantAuth.registerVRs);
 }
 
 function toggleRestaurantProfileVR(vr) {
@@ -1802,7 +1799,13 @@ function toggleRestaurantProfileVR(vr) {
   } else {
     appState.restaurantAuth.profileVRs = [...current, vr];
   }
-  renderApp();
+  syncVRChips(".prof-rest-vr-chip", appState.restaurantAuth.profileVRs);
+}
+
+function syncVRChips(selector, selected) {
+  document.querySelectorAll(selector).forEach((chip) => {
+    chip.classList.toggle("selected", selected.includes(chip.dataset.value));
+  });
 }
 
 function selectRestaurantRegisterCuisine(cuisineName) {
@@ -1829,6 +1832,7 @@ function selectRestaurantProfileCuisine(cuisineName) {
 
 async function submitRestaurantRegister(e) {
   e.preventDefault();
+  if (advanceIfNotLastStep(e)) return;
   const name = document.getElementById("regRestName")?.value;
   const email = document.getElementById("regRestEmail")?.value;
   const password = document.getElementById("regRestPassword")?.value;
@@ -1992,6 +1996,10 @@ function closeCallClientModal() {
 async function confirmCallClient(entryId) {
   const select = document.getElementById("selectCallTable");
   if (!select) return;
+  if (!select.value) {
+    showToast("Nenhuma mesa livre. Libere uma mesa na aba Mesas.", "var(--amber)");
+    return;
+  }
   const tableNum = Number(select.value);
 
   const modalData = appState.restaurantCallingModal;
@@ -2153,12 +2161,12 @@ function renderRestaurantAppView() {
   return renderRestaurantMainScreen();
 }
 
+// Mesma lista no cadastro e no perfil do restaurante
+const RESTAURANT_VR_OPTIONS = ["Alelo", "Sodexo", "Ticket Restaurante", "VR Refeição", "Flash", "iFood Benefícios", "Caju"];
+
 function renderRestaurantAuthScreen() {
   const authTab = appState.restaurantAuth.authTab;
-  const vrOptions = [
-    "Alelo", "Ticket", "Sodexo / Pluxee", "VR Refeição",
-    "Flash", "Caju", "Swile", "iFood Benefícios"
-  ];
+  const vrOptions = RESTAURANT_VR_OPTIONS;
   const selectedVRs = appState.restaurantAuth.registerVRs || [];
   const allCuisines = getAvailableCuisines();
   const selectedCuisine = appState.restaurantAuth.registerCuisine || "Executivo";
@@ -2200,145 +2208,105 @@ function renderRestaurantAuthScreen() {
           </div>
 
           <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:0.85rem;">
-            Acessar o CLTempo Restaurante
+            Entrar
           </button>
         </form>
       ` : `
-        <!-- Formulário de Cadastro -->
+        <!-- Formulário de Cadastro (2 etapas) -->
         <form onsubmit="submitRestaurantRegister(event)">
-          <div class="form-group">
-            <label class="form-label">Nome do Restaurante</label>
-            <input type="text" id="regRestName" class="form-input" placeholder="ex: Sabor do Centro" required />
+          ${renderStepDots(["Restaurante", "Operação"])}
+
+          <div class="form-step active">
+            <div class="form-group">
+              <label class="form-label">Nome do restaurante</label>
+              <input type="text" id="regRestName" class="form-input" placeholder="ex: Sabor do Centro" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">E-mail</label>
+              <input type="email" id="regRestEmail" class="form-input" placeholder="restaurante@cltempo.com.br" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Senha</label>
+              <input type="password" id="regRestPassword" class="form-input" placeholder="Mínimo 4 caracteres" minlength="4" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">WhatsApp</label>
+              <input type="text" id="regRestPhone" class="form-input" placeholder="21998876655" required />
+            </div>
+            <div class="form-group autocomplete-wrap">
+              <label class="form-label">Endereço</label>
+              <input 
+                type="text" 
+                id="regRestAddress" 
+                class="form-input" 
+                placeholder="Rua ou edifício do restaurante" 
+                required 
+                autocomplete="off"
+                oninput="handleRestaurantAddressInput('reg')"
+                onfocus="handleRestaurantAddressInput('reg')"
+              />
+              <div id="regRestPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+              <div id="regRestAddressBadge" style="margin-top:0.35rem; display:none;"></div>
+            </div>
+            <button type="button" class="btn btn-primary btn-block btn-lg" data-step-next onclick="goFormStep(this, 1)">
+              Continuar
+            </button>
           </div>
 
-          <div class="form-group">
-            <label class="form-label">E-mail</label>
-            <input type="email" id="regRestEmail" class="form-input" placeholder="restaurante@cltempo.com.br" required />
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">Senha</label>
-            <input type="password" id="regRestPassword" class="form-input" placeholder="Mínimo 4 caracteres" minlength="4" required />
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">Telefone (WhatsApp)</label>
-            <input type="text" id="regRestPhone" class="form-input" placeholder="21998876655" required />
-          </div>
-
-          <!-- Tipo de Culinária (Chips) -->
-          <div class="form-group">
-            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-              <span>Tipo de Culinária</span>
-            </label>
-            <input type="hidden" id="regRestCuisine" value="${selectedCuisine}" />
-            <div class="cuisine-grid">
-              ${allCuisines.map((c) => {
-                const sel = selectedCuisine === c.name;
-                return `
+          <div class="form-step">
+            <div class="form-group">
+              <label class="form-label">Tipo de culinária</label>
+              <input type="hidden" id="regRestCuisine" value="${selectedCuisine}" />
+              <div class="cuisine-grid">
+                ${allCuisines.map((c) => `
                   <div 
-                    class="cuisine-chip reg-rest-cuisine-chip ${sel ? "selected" : ""}" 
+                    class="cuisine-chip reg-rest-cuisine-chip ${selectedCuisine === c.name ? "selected" : ""}" 
                     data-value="${c.name}"
                     onclick="selectRestaurantRegisterCuisine('${c.name}')"
                   >
                     ${c.icon ? c.icon + " " : ""}${c.name}
                   </div>
-                `;
-              }).join("")}
+                `).join("")}
+              </div>
             </div>
-          </div>
 
-          <div class="form-group autocomplete-wrap">
-            <label class="form-label">Endereço</label>
-            <input 
-              type="text" 
-              id="regRestAddress" 
-              class="form-input" 
-              placeholder="Digite o logradouro ou edifício do restaurante..." 
-              required 
-              autocomplete="off"
-              oninput="handleRestaurantAddressInput('reg')"
-              onfocus="handleRestaurantAddressInput('reg')"
-            />
-            <div id="regRestPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
-            <div id="regRestAddressBadge" style="margin-top:0.35rem; display:none;"></div>
-          </div>
-
-          <!-- Vales-Refeição Aceitos -->
-          <div class="form-group">
-            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-              <span>Quais VRs o restaurante aceita?</span>
-              <span style="font-size:0.7rem; color:var(--text-muted); font-weight:normal;">Pode marcar mais de um ;)</span>
-            </label>
-            <div class="vr-grid">
-              ${vrOptions.map((vr) => {
-                const sel = selectedVRs.includes(vr);
-                return `
-                  <div class="vr-chip ${sel ? "selected" : ""}" onclick="toggleRestaurantRegisterVR('${vr}')">
-                    💳 ${vr}
+            <div class="form-group">
+              <label class="form-label">Vales-refeição aceitos</label>
+              <div class="vr-grid">
+                ${vrOptions.map((vr) => `
+                  <div class="vr-chip reg-rest-vr-chip ${selectedVRs.includes(vr) ? "selected" : ""}" data-value="${vr}" onclick="toggleRestaurantRegisterVR('${vr}')">
+                    ${vr}
                   </div>
-                `;
-              }).join("")}
+                `).join("")}
+              </div>
             </div>
-          </div>
 
-          <!-- Tempos Médios de Giro por Tipo de Mesa -->
-          <div style="margin:1rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-            ⏱️ Tempo Médio de Giro (minutos)
-          </div>
-          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1rem;">
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Até 2 lug.</label>
-              <input type="number" id="regRestTurnover12" class="form-input" value="25" min="5" max="120" required />
+            <div class="form-group">
+              <label class="form-label">Mesas</label>
+              ${renderTablesConfigFields("regRest")}
             </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Até 4 lug.</label>
-              <input type="number" id="regRestTurnover34" class="form-input" value="35" min="5" max="120" required />
-            </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mais de 5 lug.</label>
-              <input type="number" id="regRestTurnover5Plus" class="form-input" value="45" min="5" max="120" required />
-            </div>
-          </div>
 
-          <!-- Quantidade de Mesas Disponíveis por Tipo -->
-          <div style="margin:0.5rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-            🪑 Quantidade de Mesas
-          </div>
-          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1.25rem;">
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mesas 1-2</label>
-              <input type="number" id="regRestTables12" class="form-input" value="6" min="1" max="50" required />
-            </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mesas 3-4</label>
-              <input type="number" id="regRestTables34" class="form-input" value="6" min="1" max="50" required />
-            </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mesas 5+</label>
-              <input type="number" id="regRestTables5Plus" class="form-input" value="4" min="1" max="50" required />
+            <div style="display:flex; gap:0.5rem;">
+              <button type="button" class="btn btn-outline btn-lg" onclick="goFormStep(this, -1)">Voltar</button>
+              <button type="submit" class="btn btn-primary btn-block btn-lg">Cadastrar restaurante</button>
             </div>
           </div>
-
-          <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top:1rem;">
-            Concluir Cadastro
-          </button>
         </form>
       `}
 
-      <!-- Atalhos de Demonstração Rápida -->
-      <div style="margin-top:1.5rem; padding-top:1rem; border-top:1px dashed var(--border); text-align:center;">
-        <div style="font-size:0.72rem; color:var(--text-muted); font-weight:700; text-transform:uppercase; margin-bottom:0.45rem;">
-          Acesso Rápido para a Banca (Demo):
+      ${authTab === "login" ? `
+        <!-- Atalhos de Demonstração Rápida -->
+        <div class="demo-shortcuts">
+          <div class="demo-shortcuts-title">Acesso rápido (demo)</div>
+          <div class="demo-shortcuts-row">
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('bistro@cltempo.com.br')">🍲 Bistrô do Ouvidor</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('grao@cltempo.com.br')">🥩 Grão & Brasa</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('pasta@cltempo.com.br')">🍝 Pasta & Basta</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('sushi@cltempo.com.br')">🍣 Koji Sushi</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('verde@cltempo.com.br')">🥗 Verde & Fresco</button>
+          </div>
         </div>
-        <div style="display:flex; gap:0.35rem; justify-content:center; flex-wrap:wrap;">
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('bistro@cltempo.com.br')">🍲 Bistrô do Ouvidor</button>
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('grao@cltempo.com.br')">🥩 Grão & Brasa</button>
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('pasta@cltempo.com.br')">🍝 Pasta & Basta</button>
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('sushi@cltempo.com.br')">🍣 Koji Sushi</button>
-          <button type="button" class="btn btn-outline btn-sm" onclick="quickLoginRestaurantAs('verde@cltempo.com.br')">🥗 Verde & Fresco</button>
-        </div>
-      </div>
+      ` : ""}
     </div>
   `;
 }
@@ -2430,7 +2398,7 @@ function renderRestaurantFilaTab(restTables) {
   const activeQueue = appState.data?.active_queue || [];
   const restQueue = activeQueue.filter((q) => q.restaurant_id === rest.id);
 
-  // Parte Superior: Fila de Espera (AGUARDANDO) ordenada pelo cliente que está esperando há MAIS tempo
+  // Fila de espera (AGUARDANDO): quem espera há mais tempo primeiro
   const waitingEntries = restQueue.filter(
     (q) => q.status === "AGUARDANDO" || q.status === "WAITING"
   );
@@ -2440,7 +2408,7 @@ function renderRestaurantFilaTab(restTables) {
     return waitB - waitA || a.id - b.id;
   });
 
-  // Parte Inferior: Chamados (CHAMADO) ordenados pelo chamado há mais tempo
+  // Chamados (CHAMADO): chamado há mais tempo primeiro
   const calledEntries = restQueue.filter(
     (q) => q.status === "CHAMADO" || q.status === "CALLED"
   );
@@ -2450,262 +2418,153 @@ function renderRestaurantFilaTab(restTables) {
     return callB - callA || (a.called_at || "").localeCompare(b.called_at || "");
   });
 
-  return `
-    <!-- PARTE SUPERIOR: Fila de Espera (AGUARDANDO) -->
-    <div style="margin-bottom:1.5rem;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem;">
-        <div style="font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-          Fila de Espera (${waitingEntries.length})
-        </div>
-      </div>
+  const showWalkin = appState.ui.showWalkin;
 
+  return `
+    <!-- Chamados: precisam de ação (check-in), por isso ficam no topo quando existem -->
+    ${calledEntries.length > 0 ? `
+      <div style="margin-bottom:1.25rem;">
+        <div class="section-label">Chamados (${calledEntries.length})</div>
+        ${calledEntries.map((q) => {
+          const callMin = q.elapsed_called_min ?? calcElapsedMinutes(q.called_at);
+          return `
+            <div class="queue-card queue-card-called">
+              <div class="queue-card-row">
+                <div>
+                  <div class="queue-card-name">${q.customer_name}</div>
+                  <div class="queue-card-sub">${q.party_size} pessoa(s) • chamado há ${callMin} min</div>
+                </div>
+                <span class="badge badge-purple" style="font-weight:800;">Mesa ${q.table_number || "?"}</span>
+              </div>
+              <div style="display:flex; gap:0.4rem; margin-top:0.65rem; align-items:center;">
+                <button class="btn btn-emerald btn-sm" style="flex:1;" onclick="confirmSeatClient(${q.id})">
+                  ✓ Sentou
+                </button>
+                <button class="btn btn-outline btn-sm" onclick="openChangeTableModal(${q.id}, ${q.table_number || 1})">
+                  Trocar mesa
+                </button>
+                <button class="btn btn-outline btn-sm" title="Cancelar reserva" onclick="cancelClientReservation(${q.id})">
+                  ✕
+                </button>
+              </div>
+            </div>`;
+        }).join("")}
+      </div>
+    ` : ""}
+
+    <!-- Fila de espera -->
+    <div style="margin-bottom:1.25rem;">
+      <div class="section-label">Aguardando (${waitingEntries.length})</div>
       ${waitingEntries.length === 0 ? `
-        <div style="text-align:center; padding:1.75rem 1rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
-          Nenhum cliente aguardando na fila.
-        </div>
+        <div class="empty-state">Ninguém na fila agora.</div>
       ` : waitingEntries.map((q, idx) => {
-        // Encontra a menor mesa livre correspondente ao porte
-        const freeCatTables = restTables.filter(
+        const hasFreeTable = restTables.some(
           (t) => t.table_type === q.table_category && t.status === "LIVRE"
         );
-        freeCatTables.sort((a, b) => a.table_number - b.table_number);
-        const minFreeTable = freeCatTables[0] ? freeCatTables[0].table_number : null;
         const waitMin = q.elapsed_wait_min ?? calcElapsedMinutes(q.joined_at);
-
         return `
-          <div style="background:var(--bg-surface); border:1px solid var(--border); border-left:4px solid var(--primary); border-radius:12px; padding:0.85rem; margin-bottom:0.6rem;">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.35rem;">
+          <div class="queue-card">
+            <div class="queue-card-row">
               <div>
-                <div style="font-weight:800; font-size:0.95rem;">
-                  ${idx + 1}º ${q.customer_name}
-                </div>
-                <div style="font-size:0.73rem; color:var(--text-muted);">
-                  Mesa ${q.table_category} (${q.party_size}p) • Chegou às ${q.joined_at}
+                <div class="queue-card-name">${idx + 1}º ${q.customer_name}</div>
+                <div class="queue-card-sub">
+                  ${q.party_size} pessoa(s) • há ${waitMin} min
+                  ${hasFreeTable ? "" : ` • <span style="color:var(--rose);">sem mesa livre</span>`}
                 </div>
               </div>
-
-              ${minFreeTable !== null ? `
-                <span class="badge badge-emerald" style="font-weight:700; font-size:0.75rem;">
-                  MESA ${minFreeTable}
-                </span>
-              ` : `
-                <span class="badge badge-rose" style="font-weight:700; font-size:0.75rem;">
-                  MESA INDISPONÍVEL
-                </span>
-              `}
-            </div>
-
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.6rem;">
-              <span style="font-size:0.75rem; color:var(--amber); font-weight:700;">
-                ⏱️ Esperando na fila há <strong>${waitMin} min</strong>
-              </span>
-
-              <button 
-                class="btn btn-primary btn-sm" 
-                onclick="openCallClientModal(${q.id})"
-                style="padding:0.35rem 0.8rem; font-size:0.78rem;"
-              >
-                Chamar Cliente
+              <button class="btn btn-primary btn-sm" onclick="openCallClientModal(${q.id})">
+                Chamar
               </button>
             </div>
-          </div>
-        `;
+          </div>`;
       }).join("")}
     </div>
 
-    <!-- PARTE INFERIOR: Chamados no Balcão (CHAMADO) -->
-    <div style="margin-bottom:1.5rem;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem;">
-        <div style="font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-          Clientes chamados (${calledEntries.length})
+    <!-- Walk-in presencial: recolhido por padrão -->
+    ${showWalkin ? `
+      <div class="card" style="padding:0.85rem;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+          <span style="font-weight:700; font-size:0.85rem;">Cliente sem o app</span>
+          <button type="button" class="btn-link" onclick="toggleUIFlag('showWalkin')">Fechar</button>
         </div>
+        <form onsubmit="submitWalkinClient(event)" style="display:flex; gap:0.4rem; flex-wrap:wrap;">
+          <input type="text" id="restWalkinName" class="form-input" placeholder="Nome" required style="flex:2; font-size:0.82rem;" />
+          <select id="restWalkinParty" class="form-select" style="flex:1; font-size:0.82rem;">
+            <option value="2">1-2 pessoas</option>
+            <option value="4">3-4 pessoas</option>
+            <option value="6">5+ pessoas</option>
+          </select>
+          <button type="submit" class="btn btn-primary btn-sm">Adicionar</button>
+        </form>
       </div>
-
-      ${calledEntries.length === 0 ? `
-        <div style="text-align:center; padding:1.25rem 1rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
-          Nenhum cliente chamado no balcão no momento.
-        </div>
-      ` : calledEntries.map((q) => {
-        const callMin = q.elapsed_called_min ?? calcElapsedMinutes(q.called_at);
-
-        return `
-          <div style="background:var(--bg-surface); border:1px solid var(--border); border-left:4px solid var(--emerald); border-radius:12px; padding:0.85rem; margin-bottom:0.6rem;">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-              <div>
-                <div style="font-weight:800; font-size:0.95rem;">
-                  🔔 ${q.customer_name}
-                </div>
-                <div style="font-size:0.73rem; color:var(--text-muted);">
-                  Mesa ${q.table_category} (${q.party_size}p) • Chamado há <strong>${callMin} min</strong> (às ${q.called_at || q.joined_at})
-                </div>
-              </div>
-
-              <span class="badge badge-purple" style="font-weight:800; font-size:0.82rem;">
-                Mesa ${q.table_number || "?"}
-              </span>
-            </div>
-
-            <div style="display:flex; gap:0.4rem; margin-top:0.75rem;">
-              <button 
-                class="btn btn-outline btn-sm" 
-                onclick="openChangeTableModal(${q.id}, ${q.table_number || 1})"
-                style="flex:1; font-size:0.74rem; padding:0.35rem 0.2rem;"
-              >
-                🔄 Alterar Mesa
-              </button>
-
-              <button 
-                class="btn btn-emerald btn-sm" 
-                onclick="confirmSeatClient(${q.id})"
-                style="flex:1.2; font-size:0.74rem; padding:0.35rem 0.2rem;"
-              >
-                ✓ Check-in (Sentado)
-              </button>
-
-              <button 
-                class="btn btn-rose btn-sm" 
-                onclick="cancelClientReservation(${q.id})"
-                style="font-size:0.74rem; padding:0.35rem 0.5rem;"
-                title="Cancelar reserva"
-              >
-                ✕ Cancelar
-              </button>
-            </div>
-          </div>
-        `;
-      }).join("")}
-    </div>
-
-    <!-- Walk-in Presencial (Balcão) -->
-    <div style="padding:0.9rem; background:var(--bg-surface); border-radius:12px; border:1px solid var(--border);">
-      <div style="font-weight:700; font-size:0.82rem; margin-bottom:0.45rem;">
-        ➕ Adicionar Walk-in Presencial (Sem Celular):
-      </div>
-      <form onsubmit="submitWalkinClient(event)" style="display:flex; gap:0.4rem; flex-wrap:wrap;">
-        <input type="text" id="restWalkinName" class="form-input" placeholder="Nome do cliente" required style="flex:2; font-size:0.82rem;" />
-        <select id="restWalkinParty" class="form-select" style="flex:1; font-size:0.82rem;">
-          <option value="2">2p (1-2)</option>
-          <option value="4">4p (3-4)</option>
-          <option value="6">6p (5+)</option>
-        </select>
-        <button type="submit" class="btn btn-primary btn-sm" style="font-size:0.8rem;">Adicionar</button>
-      </form>
-    </div>
+    ` : `
+      <button type="button" class="btn btn-outline btn-block btn-sm" onclick="toggleUIFlag('showWalkin')">
+        + Adicionar cliente sem o app
+      </button>
+    `}
   `;
 }
 
 function renderRestaurantMesasTab(restTables) {
-  // Três seções: ALOCADA, LIVRE, INDISPONÍVEL
-  const alocadas = restTables.filter((t) => t.status === "ALOCADA");
-  const livres = restTables.filter((t) => t.status === "LIVRE");
-  const indisponiveis = restTables.filter((t) => t.status === "INDISPONÍVEL");
+  const groups = {
+    ALOCADA: restTables.filter((t) => t.status === "ALOCADA"),
+    LIVRE: restTables.filter((t) => t.status === "LIVRE"),
+    "INDISPONÍVEL": restTables.filter((t) => t.status === "INDISPONÍVEL"),
+  };
+  const labels = { ALOCADA: "Ocupadas", LIVRE: "Livres", "INDISPONÍVEL": "Bloqueadas" };
+  const emptyText = {
+    ALOCADA: "Nenhuma mesa ocupada.",
+    LIVRE: "Nenhuma mesa livre no momento.",
+    "INDISPONÍVEL": "Nenhuma mesa bloqueada.",
+  };
+  const filter = groups[appState.ui.tableFilter] ? appState.ui.tableFilter : "ALOCADA";
+  const list = groups[filter];
 
-  return `
-    <!-- PARTE SUPERIOR: Mesas Alocadas -->
-    <div style="margin-bottom:1.5rem;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-        <div style="font-size:0.75rem; font-weight:700; color:#9333ea; text-transform:uppercase;">
-          Mesas Alocadas (${alocadas.length})
-        </div>
-      </div>
-
-      ${alocadas.length === 0 ? `
-        <div style="text-align:center; padding:1.25rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
-          Nenhuma mesa alocada no momento.
-        </div>
-      ` : alocadas.map((t) => `
+  const cardFor = (t) => {
+    if (t.status === "ALOCADA") {
+      return `
         <div class="table-card table-card-alocada">
           <div>
-            <div class="table-num-pill">
-              <span>Mesa ${t.table_number}</span>
-              <span class="badge badge-purple" style="font-size:0.7rem;">${t.table_type} lug.</span>
-            </div>
+            <div class="table-num-pill">Mesa ${t.table_number} <span class="table-size">${t.table_type} lug.</span></div>
             <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.2rem;">
-              👤 <strong>${t.customer_name || "Cliente Ocupante"}</strong>
-              ${t.checkin_at ? ` • Sentou às ${t.checkin_at}` : (t.called_at ? ` • Chamado às ${t.called_at}` : "")}
+              ${t.customer_name || "Ocupada"}${t.checkin_at ? ` • desde ${t.checkin_at}` : ""}
             </div>
           </div>
-
-          <button 
-            class="btn btn-sm btn-outline" 
-            onclick="finishTableOrder(${t.id}, ${t.table_number}, ${t.entry_id || 0})"
-            style="font-size:0.74rem; padding:0.35rem 0.65rem;"
-          >
-            Encerrar Pedido
+          <button class="btn btn-sm btn-outline" onclick="finishTableOrder(${t.id}, ${t.table_number}, ${t.entry_id || 0})">
+            Liberar
           </button>
-        </div>
-      `).join("")}
-    </div>
-
-    <!-- PARTE DO MEIO: Mesas Livres -->
-    <div style="margin-bottom:1.5rem;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-        <div style="font-size:0.75rem; font-weight:700; color:var(--emerald-text); text-transform:uppercase;">
-          Mesas Livres (${livres.length})
-        </div>
-      </div>
-
-      ${livres.length === 0 ? `
-        <div style="text-align:center; padding:1.25rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
-          Todas as mesas estão ocupadas ou indisponíveis!
-        </div>
-      ` : livres.map((t) => `
+        </div>`;
+    }
+    if (t.status === "LIVRE") {
+      return `
         <div class="table-card table-card-livre">
-          <div>
-            <div class="table-num-pill">
-              <span>Mesa ${t.table_number}</span>
-              <span class="badge badge-emerald" style="font-size:0.7rem;">${t.table_type} lug.</span>
-            </div>
-            <div style="font-size:0.74rem; color:var(--emerald-text); margin-top:0.15rem;">
-              Disponível para alocação
-            </div>
-          </div>
-
-          <button 
-            class="btn btn-sm btn-outline" 
-            onclick="setTableOperationalStatus(${t.id}, 'INDISPONÍVEL')"
-            style="font-size:0.74rem; padding:0.35rem 0.65rem;"
-          >
-            Indisponível
+          <div class="table-num-pill">Mesa ${t.table_number} <span class="table-size">${t.table_type} lug.</span></div>
+          <button class="btn btn-sm btn-outline" onclick="setTableOperationalStatus(${t.id}, 'INDISPONÍVEL')">
+            Bloquear
           </button>
-        </div>
+        </div>`;
+    }
+    return `
+      <div class="table-card table-card-indisponivel">
+        <div class="table-num-pill">Mesa ${t.table_number} <span class="table-size">${t.table_type} lug.</span></div>
+        <button class="btn btn-sm btn-emerald" onclick="setTableOperationalStatus(${t.id}, 'LIVRE')">
+          Desbloquear
+        </button>
+      </div>`;
+  };
+
+  return `
+    <div class="auth-tabs auth-tabs-compact" style="margin-bottom:1rem;">
+      ${Object.keys(groups).map((key) => `
+        <button class="auth-tab ${filter === key ? "active" : ""}" onclick="setTableFilter('${key}')">
+          ${labels[key]} (${groups[key].length})
+        </button>
       `).join("")}
     </div>
 
-    <!-- PARTE INFERIOR: Mesas Indisponíveis -->
-    <div style="margin-bottom:1rem;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-        <div style="font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-          Mesas Indisponíveis (${indisponiveis.length})
-        </div>
-      </div>
-
-      ${indisponiveis.length === 0 ? `
-        <div style="text-align:center; padding:1rem; background:var(--bg-surface); border-radius:12px; color:var(--text-muted); font-size:0.82rem; border:1px dashed var(--border);">
-          Nenhuma mesa marcada como indisponível.
-        </div>
-      ` : indisponiveis.map((t) => `
-        <div class="table-card table-card-indisponivel">
-          <div>
-            <div class="table-num-pill">
-              <span>Mesa ${t.table_number}</span>
-              <span class="badge badge-gray" style="font-size:0.7rem;">${t.table_type} lug.</span>
-            </div>
-            <div style="font-size:0.74rem; color:var(--text-muted); margin-top:0.15rem;">
-              Bloqueada para uso
-            </div>
-          </div>
-
-          <button 
-            class="btn btn-sm btn-emerald" 
-            onclick="setTableOperationalStatus(${t.id}, 'LIVRE')"
-            style="font-size:0.74rem; padding:0.35rem 0.65rem;"
-          >
-            Liberar Mesa
-          </button>
-        </div>
-      `).join("")}
-    </div>
+    ${list.length === 0
+      ? `<div class="empty-state">${emptyText[filter]}</div>`
+      : list.map(cardFor).join("")}
   `;
 }
 
@@ -2713,7 +2572,7 @@ function renderRestaurantPerfilTab() {
   const rest = appState.restaurantAuth.restaurant;
   if (!rest) return "";
 
-  const vrOptions = ["Alelo", "Sodexo", "Ticket Restaurante", "VR Refeição", "Flash", "iFood Benefícios", "Caju"];
+  const vrOptions = RESTAURANT_VR_OPTIONS;
   const currentVRStr = rest.vr_accepted || "";
   if (!appState.restaurantAuth.profileVRs || appState.restaurantAuth.profileVRs.length === 0) {
     appState.restaurantAuth.profileVRs = currentVRStr.split(",").map((s) => s.trim()).filter(Boolean);
@@ -2721,136 +2580,102 @@ function renderRestaurantPerfilTab() {
   const selectedVRs = appState.restaurantAuth.profileVRs;
   const allCuisines = getAvailableCuisines();
   const currentCuisine = rest.cuisine_type || rest.category || "Executivo";
+  const totalTables = (rest.tables_1_2 || 6) + (rest.tables_3_4 || 6) + (rest.tables_5_plus || 4);
 
-  return `
-    <div style="display:flex; flex-direction:column; gap:1.25rem;">
-      <div class="card" style="border-color:var(--border);">
-      <div style="font-size:0.75rem; color:var(--text-muted);">Meu Perfil CLTempo</div>
-        <h3 style="font-size:1.05rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif; margin-bottom:0.75rem;">
-          ${rest.name}
-        </h3>
+  const dadosHTML = `
+    <div class="form-group">
+      <label class="form-label">Nome</label>
+      <input type="text" id="profRestName" class="form-input" value="${rest.name}" required />
+    </div>
+    <div class="form-group">
+      <label class="form-label">WhatsApp</label>
+      <input type="text" id="profRestPhone" class="form-input" value="${rest.phone_whatsapp || ""}" required />
+    </div>
+    <div class="form-group autocomplete-wrap">
+      <label class="form-label">Endereço</label>
+      <input
+        type="text"
+        id="profRestAddress"
+        class="form-input"
+        value="${rest.address || ""}"
+        required
+        autocomplete="off"
+        oninput="handleRestaurantAddressInput('prof')"
+        onfocus="handleRestaurantAddressInput('prof')"
+      />
+      <div id="profRestPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
+      <div id="profRestAddressBadge" style="margin-top:0.35rem; display:none;"></div>
+    </div>`;
 
-        <form onsubmit="submitRestaurantProfileUpdate(event)">
-          <div class="form-group">
-            <label class="form-label">Nome</label>
-            <input type="text" id="profRestName" class="form-input" value="${rest.name}" required />
+  const cardapioHTML = `
+    <div class="form-group">
+      <label class="form-label">Tipo de culinária</label>
+      <input type="hidden" id="profRestCuisine" value="${currentCuisine}" />
+      <div class="cuisine-grid">
+        ${allCuisines.map((c) => `
+          <div
+            class="cuisine-chip prof-rest-cuisine-chip ${currentCuisine === c.name ? "selected" : ""}"
+            data-value="${c.name}"
+            onclick="selectRestaurantProfileCuisine('${c.name}')"
+          >
+            ${c.icon ? c.icon + " " : ""}${c.name}
           </div>
-
-          <div class="form-group">
-            <label class="form-label">Telefone (WhatsApp)</label>
-            <input type="text" id="profRestPhone" class="form-input" value="${rest.phone_whatsapp || ""}" required />
-          </div>
-
-          <!-- Tipo de Culinária (Chips) -->
-          <div class="form-group">
-            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-              <span>Tipo de Culinária</span>
-            </label>
-            <input type="hidden" id="profRestCuisine" value="${currentCuisine}" />
-            <div class="cuisine-grid">
-              ${allCuisines.map((c) => {
-                const sel = currentCuisine === c.name;
-                return `
-                  <div 
-                    class="cuisine-chip prof-rest-cuisine-chip ${sel ? "selected" : ""}" 
-                    data-value="${c.name}"
-                    onclick="selectRestaurantProfileCuisine('${c.name}')"
-                  >
-                    ${c.icon ? c.icon + " " : ""}${c.name}
-                  </div>
-                `;
-              }).join("")}
-            </div>
-          </div>
-
-          <div class="form-group autocomplete-wrap">
-            <label class="form-label">Endereço</label>
-            <input 
-              type="text" 
-              id="profRestAddress" 
-              class="form-input" 
-              value="${rest.address || ""}" 
-              required 
-              autocomplete="off"
-              oninput="handleRestaurantAddressInput('prof')"
-              onfocus="handleRestaurantAddressInput('prof')"
-            />
-            <div id="profRestPlacesDropdown" class="autocomplete-dropdown" style="display:none;"></div>
-            <div id="profRestAddressBadge" style="font-size:0.73rem; margin-top:0.35rem; color:var(--text-muted);">
-              📍 Coordenadas: <strong>${rest.lat ? Number(rest.lat).toFixed(4) : "-22.9030"}, ${rest.lng ? Number(rest.lng).toFixed(4) : "-43.1770"}</strong> (localizado)
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">VRs Aceitos</label>
-            <div class="vr-grid">
-              ${vrOptions.map((vr) => {
-                const sel = selectedVRs.includes(vr);
-                return `
-                  <div class="vr-chip ${sel ? "selected" : ""}" onclick="toggleRestaurantProfileVR('${vr}')">
-                    <span>${sel ? "✓" : "+"}</span>
-                    <span>${vr}</span>
-                  </div>
-                `;
-              }).join("")}
-            </div>
-          </div>
-
-          <div style="margin:1rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-            ⏱️ Tempo Médio de Giro (minutos)
-          </div>
-          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1rem;">
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Até 2 lug.</label>
-              <input type="number" id="profRestTurnover12" class="form-input" value="${rest.turnover_1_2 || 25}" min="5" max="120" required />
-            </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Até 4 lug.</label>
-              <input type="number" id="profRestTurnover34" class="form-input" value="${rest.turnover_3_4 || 35}" min="5" max="120" required />
-            </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mais de 5 lug.</label>
-              <input type="number" id="profRestTurnover5Plus" class="form-input" value="${rest.turnover_5_plus || 45}" min="5" max="120" required />
-            </div>
-          </div>
-
-          <div style="margin:1rem 0 0.5rem 0; font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;">
-            🪑 Quantidade de Mesas
-          </div>
-          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.4rem; margin-bottom:1.25rem;">
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mesas 1-2</label>
-              <input type="number" id="profRestTables12" class="form-input" value="${rest.tables_1_2 || 6}" min="1" max="50" required />
-            </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mesas 3-4</label>
-              <input type="number" id="profRestTables34" class="form-input" value="${rest.tables_3_4 || 6}" min="1" max="50" required />
-            </div>
-            <div>
-              <label class="form-label" style="font-size:0.7rem;">Mesas 5+</label>
-              <input type="number" id="profRestTables5Plus" class="form-input" value="${rest.tables_5_plus || 4}" min="1" max="50" required />
-            </div>
-          </div>
-
-          <button type="submit" class="btn btn-primary btn-block">
-            Salvar Alterações
-          </button>
-        </form>
-      </div>
-
-      <!-- Ações de Conta -->
-      <div class="card" style="border-color:var(--border);">
-        <div style="display:flex; flex-direction:column; gap:0.65rem;">
-          <button type="button" class="btn btn-outline btn-block" onclick="restaurantLogout()">
-            🚪 Sair da Conta
-          </button>
-          <button type="button" class="btn btn-rose btn-block" onclick="submitRestaurantProfileDelete()">
-            🗑️ Apagar Perfil Cadastrado
-          </button>
-        </div>
+        `).join("")}
       </div>
     </div>
+    <div class="form-group">
+      <label class="form-label">Vales-refeição aceitos</label>
+      <div class="vr-grid">
+        ${vrOptions.map((vr) => `
+          <div class="vr-chip prof-rest-vr-chip ${selectedVRs.includes(vr) ? "selected" : ""}" data-value="${vr}" onclick="toggleRestaurantProfileVR('${vr}')">
+            ${vr}
+          </div>
+        `).join("")}
+      </div>
+    </div>`;
+
+  const mesasHTML = renderTablesConfigFields("profRest", rest);
+
+  return `
+    <form onsubmit="submitRestaurantProfileUpdate(event)">
+      ${renderSection("restDados", "Dados do restaurante", rest.address || "", dadosHTML)}
+      ${renderSection("restCardapio", "Culinária e vales-refeição", currentCuisine, cardapioHTML)}
+      ${renderSection("restMesas", "Mesas e tempo de giro", `${totalTables} mesas`, mesasHTML)}
+      <button type="submit" class="btn btn-primary btn-block" style="margin-top:0.85rem;" onclick="openInvalidSections(this.form)">
+        Salvar alterações
+      </button>
+    </form>
+
+    <div class="account-actions">
+      <button type="button" class="btn btn-outline btn-block" onclick="restaurantLogout()">Sair da conta</button>
+      <button type="button" class="btn-link btn-link-danger" onclick="submitRestaurantProfileDelete()">Apagar restaurante</button>
+    </div>
   `;
+}
+
+// Campos de mesas e giro, compartilhados entre cadastro (prefix "regRest") e perfil ("profRest")
+function renderTablesConfigFields(prefix, rest = {}) {
+  const rows = [
+    { label: "1-2 lugares", tables: "Tables12", turnover: "Turnover12", t: rest.tables_1_2 || 6, g: rest.turnover_1_2 || 25 },
+    { label: "3-4 lugares", tables: "Tables34", turnover: "Turnover34", t: rest.tables_3_4 || 6, g: rest.turnover_3_4 || 35 },
+    { label: "5+ lugares", tables: "Tables5Plus", turnover: "Turnover5Plus", t: rest.tables_5_plus || 4, g: rest.turnover_5_plus || 45 },
+  ];
+  return `
+    <table class="tables-config">
+      <thead>
+        <tr><th></th><th>Mesas</th><th>Giro (min)</th></tr>
+      </thead>
+      <tbody>
+        ${rows.map((r) => `
+          <tr>
+            <td>${r.label}</td>
+            <td><input type="number" id="${prefix}${r.tables}" class="form-input" value="${r.t}" min="1" max="50" required /></td>
+            <td><input type="number" id="${prefix}${r.turnover}" class="form-input" value="${r.g}" min="5" max="120" required /></td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+    <div class="form-hint" style="margin-top:0.35rem;">Giro = tempo médio que um grupo ocupa a mesa.</div>`;
 }
 // ==================== MODAIS DE CHAMADA E TROCA DE MESA ====================
 
@@ -2865,7 +2690,7 @@ function renderRestaurantCallModal() {
       <div class="modal-card" style="max-width:400px; background:#ffffff !important; color:#0f172a !important; border-radius:18px; padding:1.4rem; box-shadow:0 25px 50px -12px rgba(0,0,0,0.35); border:1px solid #e2e8f0;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
           <h3 style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif; color:#0f172a; margin:0;">
-            Chamar Cliente para a Mesa
+            Chamar cliente
           </h3>
           <button class="btn btn-outline btn-sm" onclick="closeCallClientModal()" style="border:1px solid #cbd5e1; color:#64748b; padding:0.25rem 0.55rem; font-size:1rem; border-radius:8px; background:#f8fafc;">✕</button>
         </div>
@@ -2873,35 +2698,23 @@ function renderRestaurantCallModal() {
         <div style="background:#f8fafc; padding:0.95rem; border-radius:12px; margin-bottom:1.15rem; border:1px solid #e2e8f0;">
           <div style="font-weight:800; font-size:1.05rem; color:#0f172a;">${entry.customer_name}</div>
           <div style="font-size:0.78rem; color:#475569; margin-top:0.25rem;">
-            Porte: <strong style="color:#0f172a;">Mesa ${entry.table_category} (${entry.party_size} pessoa(s))</strong>
-          </div>
-          <div style="font-size:0.78rem; color:#475569; margin-top:0.15rem;">
-            ⏱️ Aguardando desde <strong>${entry.joined_at}</strong>
+            ${entry.party_size} pessoa(s) • na fila desde ${entry.joined_at}
           </div>
         </div>
 
         <div class="form-group">
-          <label class="form-label" style="color:#334155; font-weight:700;">Selecione a Mesa para Alocação:</label>
+          <label class="form-label" style="color:#334155; font-weight:700;">Mesa:</label>
           <select id="selectCallTable" class="form-select" style="font-size:0.92rem; padding:0.65rem; background:#ffffff; color:#0f172a; border:1.5px solid #cbd5e1; border-radius:10px;">
-            ${restTables.map((t) => {
-              const isFree = t.status === "LIVRE";
+            ${restTables.filter((t) => t.status === "LIVRE").map((t) => {
               const isSuggested = t.table_number === suggestedTable;
               const isSameType = t.table_type === entry.table_category;
               return `
-                <option 
-                  value="${t.table_number}" 
-                  ${isSuggested ? "selected" : ""}
-                  ${!isFree ? "disabled" : ""}
-                  style="color:${!isFree ? "#94a3b8" : "#0f172a"};"
-                >
-                  Mesa ${t.table_number} (${t.table_type} lug.) — ${t.status}${isSuggested ? " ⭐ (Sugestão)" : (!isSameType ? " [Outro porte]" : "")}
+                <option value="${t.table_number}" ${isSuggested ? "selected" : ""}>
+                  Mesa ${t.table_number} (${t.table_type} lug.)${isSuggested ? " ⭐ sugerida" : (!isSameType ? " — outro tamanho" : "")}
                 </option>
               `;
-            }).join("")}
+            }).join("") || `<option value="" disabled selected>Nenhuma mesa livre</option>`}
           </select>
-          <div style="font-size:0.74rem; color:#64748b; margin-top:0.45rem;">
-            * Apenas mesas com status <strong>LIVRE</strong> podem ser alocadas. Mesas ocupadas não podem ser selecionadas.
-          </div>
         </div>
 
         <div style="display:flex; gap:0.6rem; margin-top:1.35rem;">
@@ -2909,7 +2722,7 @@ function renderRestaurantCallModal() {
             Cancelar
           </button>
           <button class="btn btn-emerald btn-block btn-sm" onclick="confirmCallClient(${entry.id})" style="font-weight:700;">
-            🔔 Confirmar Chamada
+            🔔 Chamar
           </button>
         </div>
       </div>
@@ -2928,7 +2741,7 @@ function renderRestaurantChangeTableModal() {
       <div class="modal-card" style="max-width:400px; background:#ffffff !important; color:#0f172a !important; border-radius:18px; padding:1.4rem; box-shadow:0 25px 50px -12px rgba(0,0,0,0.35); border:1px solid #e2e8f0;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
           <h3 style="font-size:1.15rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif; color:#0f172a; margin:0;">
-            Alterar Mesa Alocada
+            Trocar mesa
           </h3>
           <button class="btn btn-outline btn-sm" onclick="closeChangeTableModal()" style="border:1px solid #cbd5e1; color:#64748b; padding:0.25rem 0.55rem; font-size:1rem; border-radius:8px; background:#f8fafc;">✕</button>
         </div>
@@ -2941,26 +2754,17 @@ function renderRestaurantChangeTableModal() {
         </div>
 
         <div class="form-group">
-          <label class="form-label" style="color:#334155; font-weight:700;">Selecione a Nova Mesa Livre:</label>
+          <label class="form-label" style="color:#334155; font-weight:700;">Nova mesa:</label>
           <select id="selectNewTable" class="form-select" style="font-size:0.92rem; padding:0.65rem; background:#ffffff; color:#0f172a; border:1.5px solid #cbd5e1; border-radius:10px;">
-            ${restTables.map((t) => {
-              const isFree = t.status === "LIVRE";
+            ${restTables.filter((t) => t.status === "LIVRE" || t.table_number === currentTable).map((t) => {
               const isCurrent = t.table_number === currentTable;
               return `
-                <option 
-                  value="${t.table_number}" 
-                  ${isCurrent ? "selected" : ""}
-                  ${!isFree && !isCurrent ? "disabled" : ""}
-                  style="color:${!isFree && !isCurrent ? "#94a3b8" : "#0f172a"};"
-                >
-                  Mesa ${t.table_number} (${t.table_type} lug.) — ${t.status}${isCurrent ? " (Atual)" : ""}
+                <option value="${t.table_number}" ${isCurrent ? "selected" : ""}>
+                  Mesa ${t.table_number} (${t.table_type} lug.)${isCurrent ? " — atual" : ""}
                 </option>
               `;
             }).join("")}
           </select>
-          <div style="font-size:0.74rem; color:#64748b; margin-top:0.45rem;">
-            * A mesa atual será liberada e a nova mesa será marcada como ALOCADA.
-          </div>
         </div>
 
         <div style="display:flex; gap:0.6rem; margin-top:1.35rem;">
@@ -2986,107 +2790,94 @@ function renderAdminView() {
   const m3 = metrics.m3_dropout_rate;
   const m4 = metrics.m4_standing_wait_reduction;
 
+  const metricCard = (label, value, color, goal, detail) => `
+    <div class="card metric-card" title="${detail}">
+      <div class="metric-label">${label}</div>
+      <div class="metric-value" style="color:${color};">${value}</div>
+      <div class="metric-goal">${goal}</div>
+    </div>`;
+
+  const m4HasData = m4.reduction_pct !== null && m4.reduction_pct !== undefined;
+  const leads = m1.leads || [];
+
   return `
     <div style="display:flex; flex-direction:column; gap:1.25rem;">
-      <div class="card">
-        <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700; text-transform:uppercase;">
-          Painel de Validação das 4 Métricas do MVP Canvas
-        </div>
-        <h2 style="font-size:1.35rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
-          CLTempo — Empreendedorismo UFRJ
-        </h2>
-      </div>
+      <h2 style="font-size:1.25rem; font-weight:800; font-family:'Plus Jakarta Sans', sans-serif;">
+        Métricas do MVP
+      </h2>
 
-      <!-- Grid das 4 Métricas do Canvas -->
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:1rem;">
-        <div class="card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M1. Conversão Restaurantes</div>
-          <div style="font-size:1.75rem; font-weight:800; color:var(--primary);">${m1.conversion_pct}%</div>
-          <div style="font-size:0.75rem; color:var(--text-muted);">
-            Meta: >${m1.target_pct}% • ${m1.onboarded} de ${m1.total_approached} aderiram
-          </div>
-        </div>
-
-        <div class="card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M2. Frequência CLT / Semana</div>
-          <div style="font-size:1.75rem; font-weight:800; color:var(--emerald);">${m2.avg_entries_per_week}x</div>
-          <div style="font-size:0.75rem; color:var(--text-muted);">
-            Meta: >${m2.target_entries}x • ${m2.total_entries} entradas totais
-          </div>
-        </div>
-
-        <div class="card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M3. Taxa de Desistência</div>
-          <div style="font-size:1.75rem; font-weight:800; color:${m3.dropout_pct <= m3.max_acceptable_pct ? "var(--emerald)" : "var(--rose)"};">
-            ${m3.dropout_pct}%
-          </div>
-          <div style="font-size:0.75rem; color:var(--text-muted);">
-            Teto aceitável: <${m3.max_acceptable_pct}% • ${m3.cancelled_count} cancelamentos
-          </div>
-        </div>
-
-        <div class="card">
-          <div style="font-size:0.75rem; color:var(--text-muted); font-weight:700;">M4. Redução de Espera em Pé</div>
-          ${m4.reduction_pct === null || m4.reduction_pct === undefined ? `
-            <div style="font-size:1.75rem; font-weight:800; color:var(--text-muted);">—</div>
-            <div style="font-size:0.75rem; color:var(--text-muted);">
-              Nenhum cliente respondeu ainda quanto tempo ficou em pé.
-            </div>
-          ` : `
-            <div style="font-size:1.75rem; font-weight:800; color:var(--blue);">${m4.reduction_pct}%</div>
-            <div style="font-size:0.75rem; color:var(--text-muted);">
-              Meta: >${m4.target_reduction_pct}% • De ${m4.avg_standing_without_app_min}m para ~${m4.avg_standing_with_app_min}m (${m4.minutes_saved_per_lunch} min salvos)
-            </div>
-          `}
-          <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.35rem;">
-            ${m4.feedback_count} resposta(s) •
-            ${m4.baseline_source === "clientes"
-              ? `"sem o app" informado por ${m4.baseline_count} cliente(s)`
-              : `"sem o app" = benchmark de ${m4.avg_standing_without_app_min} min (nenhum cliente informou ainda)`}
-          </div>
-        </div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem;">
+        ${metricCard(
+          "M1 · Restaurantes que aderiram",
+          `${m1.conversion_pct}%`,
+          "var(--primary)",
+          `Meta: acima de ${m1.target_pct}%`,
+          `${m1.onboarded} de ${m1.total_approached} restaurantes abordados aderiram`
+        )}
+        ${metricCard(
+          "M2 · Usos por cliente/semana",
+          `${m2.avg_entries_per_week}x`,
+          "var(--emerald)",
+          `Meta: acima de ${m2.target_entries}x`,
+          `${m2.total_entries} entradas na fila no total`
+        )}
+        ${metricCard(
+          "M3 · Desistência",
+          `${m3.dropout_pct}%`,
+          m3.dropout_pct <= m3.max_acceptable_pct ? "var(--emerald)" : "var(--rose)",
+          `Meta: abaixo de ${m3.max_acceptable_pct}%`,
+          `${m3.cancelled_count} reservas canceladas`
+        )}
+        ${metricCard(
+          "M4 · Menos tempo em pé",
+          m4HasData ? `${m4.reduction_pct}%` : "—",
+          m4HasData ? "var(--blue)" : "var(--text-muted)",
+          m4HasData ? `Meta: acima de ${m4.target_reduction_pct}%` : "Sem respostas ainda",
+          m4HasData
+            ? `De ${m4.avg_standing_without_app_min} para ~${m4.avg_standing_with_app_min} min (${m4.feedback_count} respostas)`
+            : "Nenhum cliente respondeu quanto tempo ficou em pé"
+        )}
       </div>
 
       <!-- Funil de Prospecção de Restaurantes -->
       <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; gap:0.6rem; flex-wrap:wrap; margin-bottom:0.75rem;">
-          <h3 style="font-size:1.05rem; font-weight:800;">Funil de Parcerias do Polo (M1)</h3>
-          <button type="button" class="btn btn-primary btn-sm" onclick="openLeadModal()">+ Registrar restaurante abordado</button>
+          <h3 style="font-size:1rem; font-weight:800;">Restaurantes abordados (${leads.length})</h3>
+          <button type="button" class="btn btn-primary btn-sm" onclick="openLeadModal()">+ Adicionar</button>
         </div>
-        <div style="overflow-x:auto;">
-          <table class="history-table">
-            <thead>
-              <tr>
-                <th>Restaurante</th>
-                <th>Contato</th>
-                <th>Status</th>
-                <th>Observações</th>
-                <th>Atualizado</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              ${(m1.leads || []).map((l) => `
+        ${leads.length === 0 ? `<div class="empty-state">Nenhum restaurante abordado ainda.</div>` : `
+          <div style="overflow-x:auto;">
+            <table class="history-table">
+              <thead>
                 <tr>
-                  <td><strong>${l.restaurant_name}</strong></td>
-                  <td>${l.contact_person}</td>
-                  <td>
-                    <select class="form-input" style="padding:0.3rem 0.45rem; font-size:0.75rem; min-width:9.5rem;" onchange="updateLeadStatus(${l.id}, this.value)">
-                      ${Object.entries(LEAD_STATUS_LABELS).map(([value, label]) => `
-                        <option value="${value}" ${l.status === value ? "selected" : ""}>${label}</option>
-                      `).join("")}
-                    </select>
-                  </td>
-                  <td style="color:var(--text-muted); font-size:0.75rem;">${l.notes || "-"}</td>
-                  <td style="color:var(--text-muted); font-size:0.75rem; white-space:nowrap;">${l.updated_at || "-"}</td>
-                  <td>
-                    <button type="button" class="btn btn-outline btn-sm" title="Remover do funil" onclick="deleteLead(${l.id}, ${JSON.stringify(l.restaurant_name).replace(/"/g, "&quot;")})">🗑️</button>
-                  </td>
+                  <th>Restaurante</th>
+                  <th>Status</th>
+                  <th></th>
                 </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                ${leads.map((l) => `
+                  <tr>
+                    <td title="${(l.notes || "").replace(/"/g, "&quot;")}">
+                      <strong>${l.restaurant_name}</strong>
+                      ${l.contact_person ? `<div style="font-size:0.72rem; color:var(--text-muted);">${l.contact_person}</div>` : ""}
+                    </td>
+                    <td>
+                      <select class="form-input" style="padding:0.3rem 0.45rem; font-size:0.75rem; min-width:9.5rem;" onchange="updateLeadStatus(${l.id}, this.value)">
+                        ${Object.entries(LEAD_STATUS_LABELS).map(([value, label]) => `
+                          <option value="${value}" ${l.status === value ? "selected" : ""}>${label}</option>
+                        `).join("")}
+                      </select>
+                    </td>
+                    <td style="text-align:right;">
+                      <button type="button" class="btn btn-outline btn-sm" title="Remover" onclick="deleteLead(${l.id}, ${JSON.stringify(l.restaurant_name).replace(/"/g, "&quot;")})">🗑️</button>
+                    </td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        `}
       </div>
     </div>
   `;
@@ -3320,6 +3111,11 @@ Object.assign(window, {
   renderRestaurantAppView,
   renderSplitView,
   renderApp,
+  toggleUIFlag,
+  setTableFilter,
+  toggleSection,
+  openInvalidSections,
+  goFormStep,
 });
 
 // ==================== INICIALIZAÇÃO ====================
